@@ -1,0 +1,59 @@
+name: outbound-quicpersonal
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - personal/stable
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/outbound-quicpersonal.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: outbound-quicpersonal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify outbound with quic-go personal/stable
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout outbound
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout quic-go fork
+        uses: actions/checkout@v4
+        with:
+          repository: ksong008/quic-go
+          ref: personal/stable
+          path: .deps/quic-go
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.8"
+          cache-dependency-path: |
+            go.mod
+            go.sum
+
+      - name: Replace quic-go with fork branch
+        run: |
+          go mod edit -replace=github.com/daeuniverse/quic-go=${GITHUB_WORKSPACE}/.deps/quic-go
+          go mod download
+          go list -m github.com/daeuniverse/quic-go
+
+      - name: Compile tests
+        run: go test ./... -run=^$
+
+      - name: Build packages
+        run: go build ./...
