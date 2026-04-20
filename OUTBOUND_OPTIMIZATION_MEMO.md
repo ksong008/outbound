@@ -142,6 +142,7 @@ Current status:
 - `extra.downloadSettings` now has limited support:
   - downstream can be split to a separate `xhttp + tls` endpoint
   - this is currently a constrained subset, not full Xray parity
+  - a local split-endpoint integration test now passes for `stream-up`
 - `extra.xmux` now has limited support:
   - `packet-up` upload requests can reuse H2 connections
   - currently honors:
