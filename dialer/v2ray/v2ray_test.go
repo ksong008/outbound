@@ -58,7 +58,7 @@ func TestExportVlessURLVisionFlow(t *testing.T) {
 }
 
 func TestParseVlessURLXHTTP(t *testing.T) {
-	cfg, err := ParseVlessURL("vless://uuid@example.com:443?type=xhttp&security=tls&host=example.com&path=%2Fx&mode=auto&extra=seed&sni=sni.example.com&alpn=h2%2Chttp%2F1.1#xhttp")
+	cfg, err := ParseVlessURL("vless://uuid@example.com:443?type=xhttp&security=tls&host=example.com&path=%2Fx&mode=auto&extra=seed&sni=sni.example.com&alpn=h2%2Chttp%2F1.1&allowInsecure=1#xhttp")
 	if err != nil {
 		t.Fatalf("ParseVlessURL returned error: %v", err)
 	}
@@ -74,6 +74,9 @@ func TestParseVlessURLXHTTP(t *testing.T) {
 	if cfg.Path != "/x" {
 		t.Fatalf("expected xhttp path /x, got %q", cfg.Path)
 	}
+	if !cfg.AllowInsecure {
+		t.Fatalf("expected allowInsecure to be true")
+	}
 }
 
 func TestExportVlessURLXHTTP(t *testing.T) {
@@ -88,6 +91,7 @@ func TestExportVlessURLXHTTP(t *testing.T) {
 		TLS:        "tls",
 		SNI:        "sni.example.com",
 		Alpn:       "h2,http/1.1",
+		AllowInsecure: true,
 		XHTTPMode:  "auto",
 		XHTTPExtra: "seed",
 		Protocol:   "vless",
@@ -102,5 +106,8 @@ func TestExportVlessURLXHTTP(t *testing.T) {
 	}
 	if !strings.Contains(exported, "extra=seed") {
 		t.Fatalf("expected exported URL to contain extra=seed, got %q", exported)
+	}
+	if !strings.Contains(exported, "allowInsecure=1") {
+		t.Fatalf("expected exported URL to contain allowInsecure=1, got %q", exported)
 	}
 }

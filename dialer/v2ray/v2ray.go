@@ -318,7 +318,7 @@ func ParseVlessURL(vless string) (data *V2Ray, err error) {
 		TLS:           u.Query().Get("security"),
 		Flow:          u.Query().Get("flow"),
 		Alpn:          u.Query().Get("alpn"),
-		AllowInsecure: false,
+		AllowInsecure: u.Query().Get("allowInsecure") == "1" || strings.EqualFold(u.Query().Get("allowInsecure"), "true"),
 		Fingerprint:   u.Query().Get("fp"),
 		PublicKey:     u.Query().Get("pbk"),
 		ShortId:       u.Query().Get("sid"),
@@ -460,6 +460,7 @@ func (s *V2Ray) ExportToURL() string {
 			common.SetValue(&query, "alpn", s.Alpn)
 			common.SetValue(&query, "flow", s.Flow)
 			common.SetValue(&query, "fp", s.Fingerprint)
+			common.SetValue(&query, "allowInsecure", common.BoolToString(s.AllowInsecure))
 		}
 
 		U := url.URL{
