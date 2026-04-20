@@ -133,13 +133,18 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 				}
 				d, err = tls.NewReality(u.String(), d)
 			} else {
+				utlsImitate := option.UtlsImitate
+				if s.Fingerprint != "" {
+					utlsImitate = s.Fingerprint
+				}
 				u := url.URL{
 					Scheme: option.TlsImplementation,
 					Host:   net.JoinHostPort(s.Add, s.Port),
 					RawQuery: url.Values{
 						"sni":           []string{sni},
 						"allowInsecure": []string{common.BoolToString(s.AllowInsecure || option.AllowInsecure)},
-						"utlsImitate":   []string{option.UtlsImitate},
+						"utlsImitate":   []string{utlsImitate},
+						"alpn":          []string{s.Alpn},
 					}.Encode(),
 				}
 				d, _, err = tls.NewTls(option, d, u.String())
