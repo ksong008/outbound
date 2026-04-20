@@ -136,9 +136,22 @@ Current status:
 - `extra` is no longer pure passthrough only:
   - request headers can now be applied from JSON
   - `noGRPCHeader` can suppress the default gRPC-style content type
+  - `packet-up` now honors:
+    - `scMaxEachPostBytes`
+    - `scMinPostsIntervalMs`
 - `extra.downloadSettings` now has limited support:
   - downstream can be split to a separate `xhttp + tls` endpoint
   - this is currently a constrained subset, not full Xray parity
+- `extra.xmux` now has limited support:
+  - `packet-up` upload requests can reuse H2 connections
+  - currently honors:
+    - `maxConcurrency`
+    - `cMaxReuseTimes`
+- H3 / QUIC now has an initial execution path:
+  - when ALPN is exactly `h3`, xhttp requests switch to an HTTP/3 transport backend
+  - this is currently limited, but no longer just compile coverage
+  - a local real HTTP/3 `stream-one` integration test now passes
+  - a local real HTTP/3 `auto -> stream-up` integration test now passes
 
 Important limitation:
 - this is still **not** full Xray-compatible xhttp support
@@ -148,9 +161,9 @@ Important limitation:
   - `tls + auto/stream-up/stream-one/packet-up` MVP semantics
 - it does **not** yet fully implement:
   - full `downloadSettings` parity
-  - H3 / QUIC mode
+  - full H3 / QUIC parity
   - advanced `extra` semantics beyond basic headers / `noGRPCHeader`
-  - XMUX-related behavior
+  - full XMUX-related behavior beyond limited packet-up upload reuse
 
 ## 6. Recommended next steps
 

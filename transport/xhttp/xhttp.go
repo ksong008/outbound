@@ -3,9 +3,11 @@ package xhttp
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -16,7 +18,10 @@ import (
 
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
+	tuiccommon "github.com/daeuniverse/outbound/protocol/tuic/common"
 	transporttls "github.com/daeuniverse/outbound/transport/tls"
+	"github.com/daeuniverse/quic-go"
+	"github.com/daeuniverse/quic-go/http3"
 	"github.com/google/uuid"
 	"golang.org/x/net/http2"
 )
@@ -27,12 +32,18 @@ type Dialer struct {
 	mode             string
 	contentType      string
 	headers          http.Header
+	packetMaxBytes   int
+	packetMinGap     time.Duration
+	xmux            xmuxOptions
 }
 
 type extraConfig struct {
 	Headers          map[string]string       `json:"headers"`
 	NoGRPCHeader     bool                    `json:"noGRPCHeader"`
 	DownloadSettings *downloadSettingsConfig `json:"downloadSettings"`
+	ScMaxEachPostBytes rangedInt             `json:"scMaxEachPostBytes"`
+	ScMinPostsIntervalMs rangedInt           `json:"scMinPostsIntervalMs"`
+	Xmux             *xmuxConfig             `json:"xmux"`
 }
 
 type downloadSettingsConfig struct {
@@ -59,10 +70,110 @@ type xhttpSettingsConfig struct {
 }
 
 type endpoint struct {
-	dialer netproxy.Dialer
-	addr   string
-	host   string
-	path   string
+	dialer          netproxy.Dialer
+	nextDialer      netproxy.Dialer
+	addr            string
+	host            string
+	path            string
+	serverName      string
+	allowInsecure   bool
+	alpn            string
+	utlsImitate     string
+	useH3           bool
+}
+
+type xmuxConfig struct {
+	MaxConcurrency rangedInt `json:"maxConcurrency"`
+	CMaxReuseTimes rangedInt `json:"cMaxReuseTimes"`
+}
+
+type xmuxOptions struct {
+	enabled        bool
+	maxConcurrency int
+	maxReuseTimes  int
+}
+
+type h2PoolEntry struct {
+	rawConn        netproxy.Conn
+	h2Conn         *http2.ClientConn
+	active         int
+	reuseCount     int
+	maxConcurrency int
+	maxReuseTimes  int
+}
+
+type h2Pool struct {
+	mu      sync.Mutex
+	entries map[string][]*h2PoolEntry
+}
+
+type pooledH2Lease struct {
+	rawConn netproxy.Conn
+	h2Conn  *http2.ClientConn
+	release func() error
+}
+
+var globalPacketUploadPool = &h2Pool{
+	entries: make(map[string][]*h2PoolEntry),
+}
+
+type rangedInt struct {
+	set bool
+	min int
+	max int
+}
+
+func (r *rangedInt) UnmarshalJSON(data []byte) error {
+	raw := strings.TrimSpace(string(data))
+	if raw == "" || raw == "null" {
+		return nil
+	}
+	if len(raw) > 0 && raw[0] == '"' {
+		unquoted, err := strconv.Unquote(raw)
+		if err != nil {
+			return err
+		}
+		raw = strings.TrimSpace(unquoted)
+	}
+	if strings.Contains(raw, "-") {
+		parts := strings.SplitN(raw, "-", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid range %q", raw)
+		}
+		min, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+		if err != nil {
+			return err
+		}
+		max, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil {
+			return err
+		}
+		if max < min {
+			min, max = max, min
+		}
+		r.set = true
+		r.min = min
+		r.max = max
+		return nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return err
+	}
+	r.set = true
+	r.min = value
+	r.max = value
+	return nil
+}
+
+func (r rangedInt) Pick() int {
+	if !r.set {
+		return 0
+	}
+	if r.max <= r.min {
+		return r.min
+	}
+	return r.min + rand.IntN(r.max-r.min+1)
 }
 
 func normalizeMode(mode, scheme string) (string, error) {
@@ -100,6 +211,14 @@ func normalizePath(path string) string {
 	return path
 }
 
+func shouldUseH3(alpn string) bool {
+	parts := strings.Split(alpn, ",")
+	if len(parts) != 1 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(parts[0]), "h3")
+}
+
 func parseExtra(raw string) (extraConfig, error) {
 	if strings.TrimSpace(raw) == "" {
 		return extraConfig{}, nil
@@ -109,6 +228,22 @@ func parseExtra(raw string) (extraConfig, error) {
 		return extraConfig{}, fmt.Errorf("xhttp: parse extra: %w", err)
 	}
 	return cfg, nil
+}
+
+func parseXmux(cfg *xmuxConfig) xmuxOptions {
+	if cfg == nil {
+		return xmuxOptions{}
+	}
+	maxConcurrency := cfg.MaxConcurrency.Pick()
+	maxReuseTimes := cfg.CMaxReuseTimes.Pick()
+	if maxConcurrency <= 0 && maxReuseTimes <= 0 {
+		return xmuxOptions{}
+	}
+	return xmuxOptions{
+		enabled:        true,
+		maxConcurrency: maxConcurrency,
+		maxReuseTimes:  maxReuseTimes,
+	}
 }
 
 func newTLSEndpoint(
@@ -122,6 +257,20 @@ func newTLSEndpoint(
 	alpn string,
 	utlsImitate string,
 ) (endpoint, error) {
+	useH3 := shouldUseH3(alpn)
+	if useH3 {
+		return endpoint{
+			nextDialer:    nextDialer,
+			addr:          addr,
+			host:          host,
+			path:          normalizePath(path),
+			serverName:    serverName,
+			allowInsecure: allowInsecure,
+			alpn:          alpn,
+			utlsImitate:   utlsImitate,
+			useH3:         true,
+		}, nil
+	}
 	tlsURL := url.URL{
 		Scheme: option.TlsImplementation,
 		Host:   addr,
@@ -140,10 +289,15 @@ func newTLSEndpoint(
 		return endpoint{}, err
 	}
 	return endpoint{
-		dialer: tlsDialer,
-		addr:   addr,
-		host:   host,
-		path:   normalizePath(path),
+		dialer:        tlsDialer,
+		nextDialer:    nextDialer,
+		addr:          addr,
+		host:          host,
+		path:          normalizePath(path),
+		serverName:    serverName,
+		allowInsecure: allowInsecure,
+		alpn:          alpn,
+		utlsImitate:   utlsImitate,
 	}, nil
 }
 
@@ -236,6 +390,174 @@ func (d *Dialer) openH2Conn(ctx context.Context, ep endpoint) (netproxy.Conn, *h
 	return rawConn, h2ClientConn, nil
 }
 
+type requestRoundTripper interface {
+	RoundTrip(*http.Request) (*http.Response, error)
+}
+
+type requestClient struct {
+	rawConn netproxy.Conn
+	rt      requestRoundTripper
+	closeFn func() error
+}
+
+func (c *requestClient) Close() error {
+	if c.closeFn != nil {
+		return c.closeFn()
+	}
+	if c.rawConn != nil {
+		return c.rawConn.Close()
+	}
+	return nil
+}
+
+func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network string) (*requestClient, error) {
+	if !ep.useH3 {
+		rawConn, h2Conn, err := d.openH2Conn(ctx, ep)
+		if err != nil {
+			return nil, err
+		}
+		return &requestClient{
+			rawConn: rawConn,
+			rt:      h2Conn,
+			closeFn: func() error { return rawConn.Close() },
+		}, nil
+	}
+
+	rAddr, err := net.ResolveUDPAddr("udp", ep.addr)
+	if err != nil {
+		return nil, err
+	}
+	var fakeConn net.PacketConn
+	tlsCfg := &tls.Config{
+		ServerName:         ep.serverName,
+		InsecureSkipVerify: ep.allowInsecure,
+		NextProtos:         []string{"h3"},
+	}
+	quicCfg := &quic.Config{
+		EnableDatagrams: true,
+	}
+	rt := &http3.Transport{
+		TLSClientConfig: tlsCfg,
+		QUICConfig:      quicCfg,
+		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
+			udpNetwork := netproxy.MagicNetwork{Network: "udp"}.Encode()
+			if magicNetwork, err := netproxy.ParseMagicNetwork(network); err == nil {
+				udpNetwork = netproxy.MagicNetwork{Network: "udp", Mark: magicNetwork.Mark}.Encode()
+			}
+			conn, err := ep.nextDialer.DialContext(ctx, udpNetwork, ep.addr)
+			if err != nil {
+				return nil, err
+			}
+			pc, ok := conn.(netproxy.PacketConn)
+			if !ok {
+				conn.Close()
+				return nil, fmt.Errorf("xhttp: H3 requires PacketConn for %s", ep.addr)
+			}
+			fakeConn = netproxy.NewFakeNetPacketConn(
+				pc,
+				net.UDPAddrFromAddrPort(tuiccommon.GetUniqueFakeAddrPort()),
+				rAddr,
+			)
+			return quic.DialEarly(ctx, fakeConn, rAddr, tlsCfg, cfg)
+		},
+	}
+	return &requestClient{
+		rt: rt,
+		closeFn: func() error {
+			err := rt.Close()
+			if fakeConn != nil {
+				_ = fakeConn.Close()
+			}
+			return err
+		},
+	}, nil
+}
+
+func endpointPoolKey(ep endpoint) string {
+	return ep.addr + "|" + ep.host + "|" + ep.path
+}
+
+func (p *h2Pool) acquire(ctx context.Context, ep endpoint, opts xmuxOptions, opener func(context.Context, endpoint) (netproxy.Conn, *http2.ClientConn, error)) (*pooledH2Lease, error) {
+	if !opts.enabled {
+		rawConn, h2Conn, err := opener(ctx, ep)
+		if err != nil {
+			return nil, err
+		}
+		return &pooledH2Lease{
+			rawConn: rawConn,
+			h2Conn:  h2Conn,
+			release: func() error { return rawConn.Close() },
+		}, nil
+	}
+
+	key := endpointPoolKey(ep)
+	p.mu.Lock()
+	for _, entry := range p.entries[key] {
+		if !entry.h2Conn.CanTakeNewRequest() {
+			continue
+		}
+		if entry.maxConcurrency > 0 && entry.active >= entry.maxConcurrency {
+			continue
+		}
+		if entry.maxReuseTimes > 0 && entry.reuseCount >= entry.maxReuseTimes {
+			continue
+		}
+		entry.active++
+		entry.reuseCount++
+		p.mu.Unlock()
+		return &pooledH2Lease{
+			rawConn: entry.rawConn,
+			h2Conn:  entry.h2Conn,
+			release: func() error { return p.release(key, entry) },
+		}, nil
+	}
+	p.mu.Unlock()
+
+	rawConn, h2Conn, err := opener(ctx, ep)
+	if err != nil {
+		return nil, err
+	}
+	entry := &h2PoolEntry{
+		rawConn:        rawConn,
+		h2Conn:         h2Conn,
+		active:         1,
+		reuseCount:     1,
+		maxConcurrency: opts.maxConcurrency,
+		maxReuseTimes:  opts.maxReuseTimes,
+	}
+	p.mu.Lock()
+	p.entries[key] = append(p.entries[key], entry)
+	p.mu.Unlock()
+	return &pooledH2Lease{
+		rawConn: rawConn,
+		h2Conn:  h2Conn,
+		release: func() error { return p.release(key, entry) },
+	}, nil
+}
+
+func (p *h2Pool) release(key string, entry *h2PoolEntry) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if entry.active > 0 {
+		entry.active--
+	}
+	shouldClose := !entry.h2Conn.CanTakeNewRequest() || (entry.maxReuseTimes > 0 && entry.reuseCount >= entry.maxReuseTimes && entry.active == 0)
+	if shouldClose && entry.active == 0 {
+		entries := p.entries[key]
+		for i, candidate := range entries {
+			if candidate == entry {
+				p.entries[key] = append(entries[:i], entries[i+1:]...)
+				break
+			}
+		}
+		if len(p.entries[key]) == 0 {
+			delete(p.entries, key)
+		}
+		return entry.rawConn.Close()
+	}
+	return nil
+}
+
 func NewDialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, error) {
 	u, err := url.Parse(link)
 	if err != nil {
@@ -293,6 +615,9 @@ func NewDialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link stri
 		mode:             mode,
 		contentType:      contentType,
 		headers:          headers,
+		packetMaxBytes:   extra.ScMaxEachPostBytes.Pick(),
+		packetMinGap:     time.Duration(extra.ScMinPostsIntervalMs.Pick()) * time.Millisecond,
+		xmux:             parseXmux(extra.Xmux),
 	}, nil
 }
 
@@ -304,7 +629,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 	if magicNetwork.Network != "tcp" {
 		return nil, fmt.Errorf("%w: xhttp+%s", netproxy.UnsupportedTunnelTypeError, magicNetwork.Network)
 	}
-	uploadRawConn, uploadH2Conn, err := d.openH2Conn(ctx, d.uploadEndpoint)
+	uploadClient, err := d.openRequestClient(ctx, d.uploadEndpoint, network)
 	if err != nil {
 		return nil, err
 	}
@@ -327,39 +652,38 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 
 	switch d.mode {
 	case "stream-up":
-		downloadRawConn := uploadRawConn
-		downloadH2Conn := uploadH2Conn
+		downloadClient := uploadClient
 		if d.downloadEndpoint != nil {
-			downloadRawConn, downloadH2Conn, err = d.openH2Conn(ctx, downloadEndpoint)
+			downloadClient, err = d.openRequestClient(ctx, downloadEndpoint, network)
 			if err != nil {
-				uploadRawConn.Close()
+				_ = uploadClient.Close()
 				return nil, err
 			}
 		}
 
 		downloadReq, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadTargetURL, nil)
 		if err != nil {
-			uploadRawConn.Close()
-			if downloadRawConn != uploadRawConn {
-				downloadRawConn.Close()
+			_ = uploadClient.Close()
+			if downloadClient != uploadClient {
+				_ = downloadClient.Close()
 			}
 			return nil, err
 		}
 		downloadReq.Host = downloadEndpoint.host
 		downloadReq.Header = d.headers.Clone()
-		downloadResp, err := downloadH2Conn.RoundTrip(downloadReq)
+		downloadResp, err := downloadClient.rt.RoundTrip(downloadReq)
 		if err != nil {
-			uploadRawConn.Close()
-			if downloadRawConn != uploadRawConn {
-				downloadRawConn.Close()
+			_ = uploadClient.Close()
+			if downloadClient != uploadClient {
+				_ = downloadClient.Close()
 			}
 			return nil, err
 		}
 		if downloadResp.StatusCode != http.StatusOK {
 			downloadResp.Body.Close()
-			uploadRawConn.Close()
-			if downloadRawConn != uploadRawConn {
-				downloadRawConn.Close()
+			_ = uploadClient.Close()
+			if downloadClient != uploadClient {
+				_ = downloadClient.Close()
 			}
 			return nil, fmt.Errorf("xhttp: download path returned %s", downloadResp.Status)
 		}
@@ -368,9 +692,9 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		uploadReq, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadTargetURL, pr)
 		if err != nil {
 			downloadResp.Body.Close()
-			uploadRawConn.Close()
-			if downloadRawConn != uploadRawConn {
-				downloadRawConn.Close()
+			_ = uploadClient.Close()
+			if downloadClient != uploadClient {
+				_ = downloadClient.Close()
 			}
 			return nil, err
 		}
@@ -381,18 +705,21 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		}
 
 		conn := &Conn{
-			uploadConn:   uploadRawConn,
-			downloadConn: downloadRawConn,
+			uploadConn:   uploadClient.rawConn,
+			downloadConn: downloadClient.rawConn,
+			uploadRelease: uploadClient.Close,
+			downloadRelease: downloadClient.Close,
+			sharedRelease: uploadClient == downloadClient,
 			uploadBody:   pw,
 			downloadBody: downloadResp.Body,
 		}
-		go conn.finishUpload(uploadH2Conn, uploadReq)
+		go conn.finishUpload(uploadClient.rt, uploadReq)
 		return conn, nil
 	case "stream-one":
 		pr, pw := io.Pipe()
 		uploadReq, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadTargetURL, pr)
 		if err != nil {
-			uploadRawConn.Close()
+			_ = uploadClient.Close()
 			return nil, err
 		}
 		uploadReq.Host = d.uploadEndpoint.host
@@ -402,87 +729,129 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		}
 
 		conn := &Conn{
-			uploadConn:   uploadRawConn,
-			downloadConn: uploadRawConn,
+			uploadConn:   uploadClient.rawConn,
+			downloadConn: uploadClient.rawConn,
+			uploadRelease: uploadClient.Close,
+			downloadRelease: uploadClient.Close,
+			sharedRelease: true,
 			uploadBody:   pw,
 			respCh:       make(chan responseResult, 1),
 		}
-		go conn.startStreamOne(uploadH2Conn, uploadReq)
+		go conn.startStreamOne(uploadClient.rt, uploadReq)
 		return conn, nil
 	case "packet-up":
-		downloadRawConn := uploadRawConn
-		downloadH2Conn := uploadH2Conn
+		downloadClient := uploadClient
 		if d.downloadEndpoint != nil {
-			downloadRawConn, downloadH2Conn, err = d.openH2Conn(ctx, downloadEndpoint)
+			downloadClient, err = d.openRequestClient(ctx, downloadEndpoint, network)
 			if err != nil {
-				uploadRawConn.Close()
+				_ = uploadClient.Close()
 				return nil, err
 			}
 		}
 
 		downloadReq, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadTargetURL, nil)
 		if err != nil {
-			uploadRawConn.Close()
-			if downloadRawConn != uploadRawConn {
-				downloadRawConn.Close()
+			_ = uploadClient.Close()
+			if downloadClient != uploadClient {
+				_ = downloadClient.Close()
 			}
 			return nil, err
 		}
 		downloadReq.Host = downloadEndpoint.host
 		downloadReq.Header = d.headers.Clone()
-		downloadResp, err := downloadH2Conn.RoundTrip(downloadReq)
+		downloadResp, err := downloadClient.rt.RoundTrip(downloadReq)
 		if err != nil {
-			uploadRawConn.Close()
-			if downloadRawConn != uploadRawConn {
-				downloadRawConn.Close()
+			_ = uploadClient.Close()
+			if downloadClient != uploadClient {
+				_ = downloadClient.Close()
 			}
 			return nil, err
 		}
 		if downloadResp.StatusCode != http.StatusOK {
 			downloadResp.Body.Close()
-			uploadRawConn.Close()
-			if downloadRawConn != uploadRawConn {
-				downloadRawConn.Close()
+			_ = uploadClient.Close()
+			if downloadClient != uploadClient {
+				_ = downloadClient.Close()
 			}
 			return nil, fmt.Errorf("xhttp: download path returned %s", downloadResp.Status)
 		}
 
 		conn := &Conn{
-			uploadConn:   uploadRawConn,
-			downloadConn: downloadRawConn,
+			uploadConn:   uploadClient.rawConn,
+			downloadConn: downloadClient.rawConn,
+			uploadRelease: uploadClient.Close,
+			downloadRelease: downloadClient.Close,
+			sharedRelease: uploadClient == downloadClient,
 			downloadBody: downloadResp.Body,
-			packetUpload: func(p []byte) error {
-				req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, uploadTargetURL, bytes.NewReader(p))
-				if err != nil {
-					return err
-				}
-				req.Host = d.uploadEndpoint.host
-				req.Header = d.headers.Clone()
-				if d.contentType != "" {
-					req.Header.Set("Content-Type", d.contentType)
-				}
-				resp, err := uploadH2Conn.RoundTrip(req)
-				if err != nil {
-					return err
-				}
-				defer resp.Body.Close()
-				io.Copy(io.Discard, resp.Body)
-				if resp.StatusCode != http.StatusOK {
-					return fmt.Errorf("xhttp: packet-up path returned %s", resp.Status)
-				}
-				return nil
-			},
+			packetUpload: d.buildPacketUploader(uploadClient.rt, uploadTargetURL),
+		}
+		if d.xmux.enabled && !d.uploadEndpoint.useH3 {
+			_ = uploadClient.Close()
+			lease, err := globalPacketUploadPool.acquire(ctx, d.uploadEndpoint, d.xmux, d.openH2Conn)
+			if err != nil {
+				conn.Close()
+				return nil, err
+			}
+			conn.uploadConn = nil
+			conn.uploadRelease = lease.release
+			conn.packetUpload = d.buildPacketUploader(lease.h2Conn, uploadTargetURL)
 		}
 		return conn, nil
 	default:
-		uploadRawConn.Close()
+		_ = uploadClient.Close()
 		return nil, fmt.Errorf("xhttp: mode %q is not supported yet", d.mode)
+	}
+}
+
+func (d *Dialer) buildPacketUploader(uploadRT requestRoundTripper, uploadTargetURL string) func([]byte) error {
+	return func(p []byte) error {
+		chunks := [][]byte{p}
+		if d.packetMaxBytes > 0 && len(p) > d.packetMaxBytes {
+			chunks = make([][]byte, 0, (len(p)+d.packetMaxBytes-1)/d.packetMaxBytes)
+			for start := 0; start < len(p); start += d.packetMaxBytes {
+				end := start + d.packetMaxBytes
+				if end > len(p) {
+					end = len(p)
+				}
+				chunks = append(chunks, p[start:end])
+			}
+		}
+
+		for i, chunk := range chunks {
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, uploadTargetURL, bytes.NewReader(chunk))
+			if err != nil {
+				return err
+			}
+			req.Host = d.uploadEndpoint.host
+			req.Header = d.headers.Clone()
+			if d.contentType != "" {
+				req.Header.Set("Content-Type", d.contentType)
+			}
+				resp, err := uploadRT.RoundTrip(req)
+			if err != nil {
+				return err
+			}
+			func() {
+				defer resp.Body.Close()
+				io.Copy(io.Discard, resp.Body)
+			}()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("xhttp: packet-up path returned %s", resp.Status)
+			}
+			if i != len(chunks)-1 && d.packetMinGap > 0 {
+				time.Sleep(d.packetMinGap)
+			}
+		}
+		return nil
 	}
 }
 
 type Conn struct {
 	uploadConn   netproxy.Conn
 	downloadConn netproxy.Conn
+	uploadRelease func() error
+	downloadRelease func() error
+	sharedRelease bool
 	uploadBody   *io.PipeWriter
 	downloadBody io.ReadCloser
 	packetUpload func([]byte) error
@@ -498,8 +867,8 @@ type responseResult struct {
 	err  error
 }
 
-func (c *Conn) finishUpload(h2 *http2.ClientConn, req *http.Request) {
-	resp, err := h2.RoundTrip(req)
+func (c *Conn) finishUpload(rt requestRoundTripper, req *http.Request) {
+	resp, err := rt.RoundTrip(req)
 	if err != nil {
 		c.uploadErr = err
 		return
@@ -511,8 +880,8 @@ func (c *Conn) finishUpload(h2 *http2.ClientConn, req *http.Request) {
 	}
 }
 
-func (c *Conn) startStreamOne(h2 *http2.ClientConn, req *http.Request) {
-	resp, err := h2.RoundTrip(req)
+func (c *Conn) startStreamOne(rt requestRoundTripper, req *http.Request) {
+	resp, err := rt.RoundTrip(req)
 	if err != nil {
 		c.respCh <- responseResult{err: err}
 		return
@@ -571,11 +940,15 @@ func (c *Conn) Close() error {
 		if c.downloadBody != nil {
 			_ = c.downloadBody.Close()
 		}
-		if c.uploadConn != nil {
+		if c.uploadRelease != nil {
+			err = c.uploadRelease()
+		} else if c.uploadConn != nil {
 			err = c.uploadConn.Close()
 		}
-		if c.downloadConn != nil && c.downloadConn != c.uploadConn {
-			_ = c.downloadConn.Close()
+			if c.downloadRelease != nil && !c.sharedRelease {
+				_ = c.downloadRelease()
+			} else if c.downloadConn != nil && c.downloadConn != c.uploadConn {
+				_ = c.downloadConn.Close()
 		}
 	})
 	return err
