@@ -56,3 +56,51 @@ func TestExportVlessURLVisionFlow(t *testing.T) {
 		t.Fatalf("expected exported URL to contain encoded alpn, got %q", exported)
 	}
 }
+
+func TestParseVlessURLXHTTP(t *testing.T) {
+	cfg, err := ParseVlessURL("vless://uuid@example.com:443?type=xhttp&security=tls&host=example.com&path=%2Fx&mode=auto&extra=seed&sni=sni.example.com&alpn=h2%2Chttp%2F1.1#xhttp")
+	if err != nil {
+		t.Fatalf("ParseVlessURL returned error: %v", err)
+	}
+	if cfg.Net != "xhttp" {
+		t.Fatalf("expected network xhttp, got %q", cfg.Net)
+	}
+	if cfg.XHTTPMode != "auto" {
+		t.Fatalf("expected xhttp mode auto, got %q", cfg.XHTTPMode)
+	}
+	if cfg.XHTTPExtra != "seed" {
+		t.Fatalf("expected xhttp extra seed, got %q", cfg.XHTTPExtra)
+	}
+	if cfg.Path != "/x" {
+		t.Fatalf("expected xhttp path /x, got %q", cfg.Path)
+	}
+}
+
+func TestExportVlessURLXHTTP(t *testing.T) {
+	cfg := &V2Ray{
+		Ps:         "xhttp",
+		Add:        "example.com",
+		Port:       "443",
+		ID:         "uuid",
+		Net:        "xhttp",
+		Host:       "example.com",
+		Path:       "/x",
+		TLS:        "tls",
+		SNI:        "sni.example.com",
+		Alpn:       "h2,http/1.1",
+		XHTTPMode:  "auto",
+		XHTTPExtra: "seed",
+		Protocol:   "vless",
+	}
+
+	exported := cfg.ExportToURL()
+	if !strings.Contains(exported, "type=xhttp") {
+		t.Fatalf("expected exported URL to contain type=xhttp, got %q", exported)
+	}
+	if !strings.Contains(exported, "mode=auto") {
+		t.Fatalf("expected exported URL to contain mode=auto, got %q", exported)
+	}
+	if !strings.Contains(exported, "extra=seed") {
+		t.Fatalf("expected exported URL to contain extra=seed, got %q", exported)
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"github.com/daeuniverse/outbound/transport/meek"
 	"github.com/daeuniverse/outbound/transport/tls"
 	"github.com/daeuniverse/outbound/transport/ws"
+	"github.com/daeuniverse/outbound/transport/xhttp"
 	jsoniter "github.com/json-iterator/go"
 )
 
@@ -38,6 +39,8 @@ type V2Ray struct {
 	Host          string `json:"host"`
 	SNI           string `json:"sni"`
 	Path          string `json:"path"`
+	XHTTPMode     string `json:"mode,omitempty"`
+	XHTTPExtra    string `json:"extra,omitempty"`
 	TLS           string `json:"tls"`
 	Flow          string `json:"flow,omitempty"`
 	Alpn          string `json:"alpn,omitempty"`
@@ -238,6 +241,41 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 		if err != nil {
 			return nil, nil, err
 		}
+	case "xhttp":
+		sni := s.SNI
+		if sni == "" {
+			sni = s.Host
+		}
+		if sni == "" {
+			sni = s.Add
+		}
+		scheme := "http"
+		if s.TLS == "tls" {
+			scheme = "https"
+		}
+		utlsImitate := option.UtlsImitate
+		if s.Fingerprint != "" {
+			utlsImitate = s.Fingerprint
+		}
+		u := url.URL{
+			Scheme: scheme,
+			Host:   net.JoinHostPort(s.Add, s.Port),
+			Path:   s.Path,
+			RawQuery: url.Values{
+				"host":              []string{s.Host},
+				"sni":               []string{sni},
+				"allowInsecure":     []string{common.BoolToString(s.AllowInsecure || option.AllowInsecure)},
+				"tlsImplementation": []string{option.TlsImplementation},
+				"utlsImitate":       []string{utlsImitate},
+				"alpn":              []string{s.Alpn},
+				"mode":              []string{s.XHTTPMode},
+				"extra":             []string{s.XHTTPExtra},
+			}.Encode(),
+		}
+		d, err = xhttp.NewDialer(option, d, u.String())
+		if err != nil {
+			return nil, nil, err
+		}
 	default:
 		return nil, nil, fmt.Errorf("%w: network: %v", dialer.UnexpectedFieldErr, s.Net)
 	}
@@ -275,6 +313,8 @@ func ParseVlessURL(vless string) (data *V2Ray, err error) {
 		Host:          u.Query().Get("host"),
 		SNI:           u.Query().Get("sni"),
 		Path:          u.Query().Get("path"),
+		XHTTPMode:     u.Query().Get("mode"),
+		XHTTPExtra:    u.Query().Get("extra"),
 		TLS:           u.Query().Get("security"),
 		Flow:          u.Query().Get("flow"),
 		Alpn:          u.Query().Get("alpn"),
@@ -394,9 +434,13 @@ func (s *V2Ray) ExportToURL() string {
 		common.SetValue(&query, "type", s.Net)
 		common.SetValue(&query, "security", s.TLS)
 		switch s.Net {
-		case "websocket", "ws", "http", "h2", "httpupgrade":
+		case "websocket", "ws", "http", "h2", "httpupgrade", "xhttp":
 			common.SetValue(&query, "path", s.Path)
 			common.SetValue(&query, "host", s.Host)
+			if s.Net == "xhttp" {
+				common.SetValue(&query, "mode", s.XHTTPMode)
+				common.SetValue(&query, "extra", s.XHTTPExtra)
+			}
 		case "mkcp", "kcp":
 			common.SetValue(&query, "headerType", s.Type)
 			common.SetValue(&query, "seed", s.Path)
