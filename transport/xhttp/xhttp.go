@@ -931,6 +931,13 @@ func (c *Conn) Write(p []byte) (n int, err error) {
 	return c.uploadBody.Write(p)
 }
 
+func (c *Conn) CloseWrite() error {
+	if c.uploadBody == nil {
+		return nil
+	}
+	return c.uploadBody.Close()
+}
+
 func (c *Conn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
