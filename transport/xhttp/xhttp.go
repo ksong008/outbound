@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,7 +35,23 @@ type Dialer struct {
 	headers          http.Header
 	packetMaxBytes   int
 	packetMinGap     time.Duration
-	xmux            xmuxOptions
+	xmux             xmuxOptions
+	noSSEHeader      bool
+	scMaxBufferedPosts int
+	xPaddingBytes    rangedInt
+	xPaddingObfsMode bool
+	xPaddingKey      string
+	xPaddingHeader   string
+	xPaddingPlacement string
+	xPaddingMethod   string
+	uplinkHTTPMethod string
+	sessionPlacement string
+	sessionKey       string
+	seqPlacement     string
+	seqKey           string
+	uplinkDataPlacement string
+	uplinkDataKey       string
+	uplinkChunkSize     rangedInt
 }
 
 type extraConfig struct {
@@ -44,6 +61,22 @@ type extraConfig struct {
 	ScMaxEachPostBytes rangedInt             `json:"scMaxEachPostBytes"`
 	ScMinPostsIntervalMs rangedInt           `json:"scMinPostsIntervalMs"`
 	Xmux             *xmuxConfig             `json:"xmux"`
+	XPaddingBytes    rangedInt               `json:"xPaddingBytes"`
+	XPaddingObfsMode bool                    `json:"xPaddingObfsMode"`
+	XPaddingKey      string                  `json:"xPaddingKey"`
+	XPaddingHeader   string                  `json:"xPaddingHeader"`
+	XPaddingPlacement string                 `json:"xPaddingPlacement"`
+	XPaddingMethod   string                  `json:"xPaddingMethod"`
+	NoSSEHeader      bool                    `json:"noSSEHeader"`
+	ScMaxBufferedPosts int                   `json:"scMaxBufferedPosts"`
+	UplinkHTTPMethod string                  `json:"uplinkHTTPMethod"`
+	SessionPlacement string                  `json:"sessionPlacement"`
+	SessionKey       string                  `json:"sessionKey"`
+	SeqPlacement     string                  `json:"seqPlacement"`
+	SeqKey           string                  `json:"seqKey"`
+	UplinkDataPlacement string               `json:"uplinkDataPlacement"`
+	UplinkDataKey       string               `json:"uplinkDataKey"`
+	UplinkChunkSize     rangedInt            `json:"uplinkChunkSize"`
 }
 
 type downloadSettingsConfig struct {
@@ -52,6 +85,7 @@ type downloadSettingsConfig struct {
 	Network       string               `json:"network"`
 	Security      string               `json:"security"`
 	TLSSettings   tlsSettingsConfig    `json:"tlsSettings"`
+	RealitySettings realitySettingsConfig `json:"realitySettings"`
 	XHTTPSettings xhttpSettingsConfig  `json:"xhttpSettings"`
 }
 
@@ -60,6 +94,14 @@ type tlsSettingsConfig struct {
 	AllowInsecure bool     `json:"allowInsecure"`
 	ALPN          []string `json:"alpn"`
 	Fingerprint   string   `json:"fingerprint"`
+}
+
+type realitySettingsConfig struct {
+	ServerName  string `json:"serverName"`
+	Fingerprint string `json:"fingerprint"`
+	PublicKey   string `json:"publicKey"`
+	ShortID     string `json:"shortId"`
+	SpiderX     string `json:"spiderX"`
 }
 
 type xhttpSettingsConfig struct {
@@ -77,20 +119,30 @@ type endpoint struct {
 	path            string
 	serverName      string
 	allowInsecure   bool
+	security        string
 	alpn            string
 	utlsImitate     string
+	publicKey       string
+	shortID         string
+	spiderX         string
 	useH3           bool
 }
 
 type xmuxConfig struct {
+	MaxConnections rangedInt `json:"maxConnections"`
 	MaxConcurrency rangedInt `json:"maxConcurrency"`
 	CMaxReuseTimes rangedInt `json:"cMaxReuseTimes"`
+	HMaxRequestTimes rangedInt `json:"hMaxRequestTimes"`
+	HMaxReusableSecs rangedInt `json:"hMaxReusableSecs"`
 }
 
 type xmuxOptions struct {
 	enabled        bool
+	maxConnections int
 	maxConcurrency int
 	maxReuseTimes  int
+	hMaxRequestTimes int
+	hMaxReusableSecs int
 }
 
 type h2PoolEntry struct {
@@ -100,6 +152,8 @@ type h2PoolEntry struct {
 	reuseCount     int
 	maxConcurrency int
 	maxReuseTimes  int
+	leftRequests   int
+	unreusableAt   time.Time
 }
 
 type h2Pool struct {
@@ -122,6 +176,17 @@ type rangedInt struct {
 	min int
 	max int
 }
+
+const charsetBase62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+const (
+	placementQueryInHeader = "queryinheader"
+	placementCookie        = "cookie"
+	placementHeader        = "header"
+	placementQuery         = "query"
+	placementPath          = "path"
+	placementBody          = "body"
+	placementAuto          = "auto"
+)
 
 func (r *rangedInt) UnmarshalJSON(data []byte) error {
 	raw := strings.TrimSpace(string(data))
@@ -176,10 +241,16 @@ func (r rangedInt) Pick() int {
 	return r.min + rand.IntN(r.max-r.min+1)
 }
 
-func normalizeMode(mode, scheme string) (string, error) {
+func normalizeMode(mode, scheme, security string, hasDownloadSettings bool) (string, error) {
 	mode = strings.TrimSpace(strings.ToLower(mode))
 	switch mode {
 	case "", "auto":
+		if strings.EqualFold(security, "reality") {
+			if hasDownloadSettings {
+				return "stream-up", nil
+			}
+			return "stream-one", nil
+		}
 		if scheme == "https" {
 			return "stream-up", nil
 		}
@@ -234,30 +305,301 @@ func parseXmux(cfg *xmuxConfig) xmuxOptions {
 	if cfg == nil {
 		return xmuxOptions{}
 	}
+	maxConnections := cfg.MaxConnections.Pick()
 	maxConcurrency := cfg.MaxConcurrency.Pick()
 	maxReuseTimes := cfg.CMaxReuseTimes.Pick()
-	if maxConcurrency <= 0 && maxReuseTimes <= 0 {
+	hMaxRequestTimes := cfg.HMaxRequestTimes.Pick()
+	hMaxReusableSecs := cfg.HMaxReusableSecs.Pick()
+	if maxConnections <= 0 && maxConcurrency <= 0 && maxReuseTimes <= 0 && hMaxRequestTimes <= 0 && hMaxReusableSecs <= 0 {
 		return xmuxOptions{}
 	}
 	return xmuxOptions{
 		enabled:        true,
+		maxConnections: maxConnections,
 		maxConcurrency: maxConcurrency,
 		maxReuseTimes:  maxReuseTimes,
+		hMaxRequestTimes: hMaxRequestTimes,
+		hMaxReusableSecs: hMaxReusableSecs,
 	}
 }
 
-func newTLSEndpoint(
+func (d *Dialer) normalizedUplinkHTTPMethod() string {
+	if d.uplinkHTTPMethod == "" {
+		return http.MethodPost
+	}
+	return d.uplinkHTTPMethod
+}
+
+func (d *Dialer) normalizedSessionPlacement() string {
+	if d.sessionPlacement == "" {
+		return placementPath
+	}
+	return strings.ToLower(d.sessionPlacement)
+}
+
+func (d *Dialer) normalizedSeqPlacement() string {
+	if d.seqPlacement == "" {
+		return placementPath
+	}
+	return strings.ToLower(d.seqPlacement)
+}
+
+func (d *Dialer) normalizedUplinkDataPlacement() string {
+	if d.uplinkDataPlacement == "" {
+		return placementBody
+	}
+	return strings.ToLower(d.uplinkDataPlacement)
+}
+
+func (d *Dialer) normalizedSessionKey() string {
+	if d.sessionKey != "" {
+		return d.sessionKey
+	}
+	switch d.normalizedSessionPlacement() {
+	case placementHeader:
+		return "X-Session"
+	case placementCookie, placementQuery:
+		return "x_session"
+	default:
+		return ""
+	}
+}
+
+func (d *Dialer) normalizedSeqKey() string {
+	if d.seqKey != "" {
+		return d.seqKey
+	}
+	switch d.normalizedSeqPlacement() {
+	case placementHeader:
+		return "X-Seq"
+	case placementCookie, placementQuery:
+		return "x_seq"
+	default:
+		return ""
+	}
+}
+
+func (d *Dialer) normalizedUplinkDataKey() string {
+	if d.uplinkDataKey != "" {
+		return d.uplinkDataKey
+	}
+	return "X-Data"
+}
+
+func (d *Dialer) normalizedUplinkChunkSize() rangedInt {
+	if !d.uplinkChunkSize.set || d.uplinkChunkSize.max == 0 {
+		switch d.normalizedUplinkDataPlacement() {
+		case placementCookie:
+			return rangedInt{set: true, min: 2 * 1024, max: 3 * 1024}
+		case placementHeader:
+			return rangedInt{set: true, min: 3 * 1000, max: 4 * 1000}
+		default:
+			return rangedInt{set: true, min: d.packetMaxBytes, max: d.packetMaxBytes}
+		}
+	}
+	if d.uplinkChunkSize.min < 64 {
+		maxV := d.uplinkChunkSize.max
+		if maxV < 64 {
+			maxV = 64
+		}
+		return rangedInt{set: true, min: 64, max: maxV}
+	}
+	return d.uplinkChunkSize
+}
+
+func appendToPathValue(pathValue, suffix string) string {
+	if strings.HasSuffix(pathValue, "/") {
+		return pathValue + suffix
+	}
+	return pathValue + "/" + suffix
+}
+
+func (d *Dialer) applyMetaToRequest(req *http.Request, sessionID, seqStr string) {
+	if req == nil {
+		return
+	}
+	if sessionID != "" {
+		switch d.normalizedSessionPlacement() {
+		case placementPath:
+			req.URL.Path = appendToPathValue(req.URL.Path, sessionID)
+		case placementQuery:
+			q := req.URL.Query()
+			q.Set(d.normalizedSessionKey(), sessionID)
+			req.URL.RawQuery = q.Encode()
+		case placementHeader:
+			req.Header.Set(d.normalizedSessionKey(), sessionID)
+		case placementCookie:
+			req.AddCookie(&http.Cookie{Name: d.normalizedSessionKey(), Value: sessionID})
+		}
+	}
+	if seqStr != "" {
+		switch d.normalizedSeqPlacement() {
+		case placementPath:
+			req.URL.Path = appendToPathValue(req.URL.Path, seqStr)
+		case placementQuery:
+			q := req.URL.Query()
+			q.Set(d.normalizedSeqKey(), seqStr)
+			req.URL.RawQuery = q.Encode()
+		case placementHeader:
+			req.Header.Set(d.normalizedSeqKey(), seqStr)
+		case placementCookie:
+			req.AddCookie(&http.Cookie{Name: d.normalizedSeqKey(), Value: seqStr})
+		}
+	}
+}
+
+func (d *Dialer) applyPayloadToRequest(req *http.Request, payload []byte) error {
+	switch d.normalizedUplinkDataPlacement() {
+	case placementBody, placementAuto:
+		req.Body = io.NopCloser(bytes.NewReader(payload))
+		req.ContentLength = int64(len(payload))
+	case placementHeader:
+		key := d.normalizedUplinkDataKey()
+		encoded := base64.RawURLEncoding.EncodeToString(payload)
+		chunkRange := d.normalizedUplinkChunkSize()
+		for i := 0; len(encoded) > 0; i++ {
+			size := chunkRange.Pick()
+			if size <= 0 || size > len(encoded) {
+				size = len(encoded)
+			}
+			chunk := encoded[:size]
+			encoded = encoded[size:]
+			req.Header.Set(fmt.Sprintf("%s-%d", key, i), chunk)
+		}
+	case placementCookie:
+		key := d.normalizedUplinkDataKey()
+		encoded := base64.RawURLEncoding.EncodeToString(payload)
+		chunkRange := d.normalizedUplinkChunkSize()
+		for i := 0; len(encoded) > 0; i++ {
+			size := chunkRange.Pick()
+			if size <= 0 || size > len(encoded) {
+				size = len(encoded)
+			}
+			chunk := encoded[:size]
+			encoded = encoded[size:]
+			req.AddCookie(&http.Cookie{Name: fmt.Sprintf("%s_%d", key, i), Value: chunk, Path: "/"})
+		}
+	default:
+		return fmt.Errorf("xhttp: unsupported uplink data placement %q", d.uplinkDataPlacement)
+	}
+	return nil
+}
+
+func (d *Dialer) prepareStreamRequest(req *http.Request, sessionID string) {
+	req.Header = d.headers.Clone()
+	d.applyXPaddingToRequest(req)
+	d.applyMetaToRequest(req, sessionID, "")
+	if req.Body != nil && d.contentType != "" {
+		req.Header.Set("Content-Type", d.contentType)
+	}
+}
+
+func (d *Dialer) preparePacketRequest(req *http.Request, sessionID, seqStr string, payload []byte) error {
+	req.Header = d.headers.Clone()
+	if err := d.applyPayloadToRequest(req, payload); err != nil {
+		return err
+	}
+	d.applyXPaddingToRequest(req)
+	d.applyMetaToRequest(req, sessionID, seqStr)
+	return nil
+}
+
+func normalizedXPaddingRange(r rangedInt) rangedInt {
+	if !r.set || r.max == 0 {
+		return rangedInt{set: true, min: 100, max: 1000}
+	}
+	return r
+}
+
+func randomStringFromCharset(n int, charset string) string {
+	if n <= 0 || len(charset) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(n)
+	for i := 0; i < n; i++ {
+		b.WriteByte(charset[rand.IntN(len(charset))])
+	}
+	return b.String()
+}
+
+func generatePadding(length int, method string) string {
+	if length <= 0 {
+		return ""
+	}
+	switch strings.ToLower(method) {
+	case "", "repeat-x":
+		return strings.Repeat("X", length)
+	case "tokenish":
+		return randomStringFromCharset(length, charsetBase62)
+	default:
+		return strings.Repeat("X", length)
+	}
+}
+
+func (d *Dialer) applyXPaddingToRequest(req *http.Request) {
+	if req == nil {
+		return
+	}
+	padding := generatePadding(normalizedXPaddingRange(d.xPaddingBytes).Pick(), d.xPaddingMethod)
+	if padding == "" {
+		return
+	}
+	if !d.xPaddingObfsMode {
+		u := *req.URL
+		q := u.Query()
+		q.Set("x_padding", padding)
+		u.RawQuery = q.Encode()
+		req.Header.Set("Referer", u.String())
+		return
+	}
+
+	switch strings.ToLower(d.xPaddingPlacement) {
+	case "header":
+		header := d.xPaddingHeader
+		if header == "" {
+			header = "X-Padding"
+		}
+		req.Header.Set(header, padding)
+	case "cookie":
+		key := d.xPaddingKey
+		if key == "" {
+			key = "x_padding"
+		}
+		req.AddCookie(&http.Cookie{Name: key, Value: padding, Path: "/"})
+	case "query":
+		key := d.xPaddingKey
+		if key == "" {
+			key = "x_padding"
+		}
+		q := req.URL.Query()
+		q.Set(key, padding)
+		req.URL.RawQuery = q.Encode()
+	default:
+		u := *req.URL
+		q := u.Query()
+		q.Set("x_padding", padding)
+		u.RawQuery = q.Encode()
+		req.Header.Set("Referer", u.String())
+	}
+}
+
+func newSecureEndpoint(
 	option *dialer.ExtraOption,
 	nextDialer netproxy.Dialer,
 	addr string,
 	host string,
 	path string,
+	security string,
 	serverName string,
 	allowInsecure bool,
 	alpn string,
 	utlsImitate string,
+	publicKey string,
+	shortID string,
+	spiderX string,
 ) (endpoint, error) {
-	useH3 := shouldUseH3(alpn)
+	useH3 := strings.EqualFold(security, "tls") && shouldUseH3(alpn)
 	if useH3 {
 		return endpoint{
 			nextDialer:    nextDialer,
@@ -266,9 +608,48 @@ func newTLSEndpoint(
 			path:          normalizePath(path),
 			serverName:    serverName,
 			allowInsecure: allowInsecure,
+			security:      security,
 			alpn:          alpn,
 			utlsImitate:   utlsImitate,
+			publicKey:     publicKey,
+			shortID:       shortID,
+			spiderX:       spiderX,
 			useH3:         true,
+		}, nil
+	}
+	if strings.EqualFold(security, "reality") {
+		if shouldUseH3(alpn) {
+			return endpoint{}, fmt.Errorf("xhttp: reality with h3 is not supported")
+		}
+		realityURL := url.URL{
+			Scheme: "reality",
+			Host:   addr,
+			RawQuery: url.Values{
+				"sni": []string{serverName},
+				"fp":  []string{utlsImitate},
+				"sid": []string{shortID},
+				"pbk": []string{publicKey},
+				"spx": []string{spiderX},
+			}.Encode(),
+		}
+		realityDialer, err := transporttls.NewReality(realityURL.String(), nextDialer)
+		if err != nil {
+			return endpoint{}, err
+		}
+		return endpoint{
+			dialer:        realityDialer,
+			nextDialer:    nextDialer,
+			addr:          addr,
+			host:          host,
+			path:          normalizePath(path),
+			serverName:    serverName,
+			allowInsecure: allowInsecure,
+			security:      security,
+			alpn:          alpn,
+			utlsImitate:   utlsImitate,
+			publicKey:     publicKey,
+			shortID:       shortID,
+			spiderX:       spiderX,
 		}, nil
 	}
 	tlsURL := url.URL{
@@ -296,8 +677,12 @@ func newTLSEndpoint(
 		path:          normalizePath(path),
 		serverName:    serverName,
 		allowInsecure: allowInsecure,
+		security:      security,
 		alpn:          alpn,
 		utlsImitate:   utlsImitate,
+		publicKey:     publicKey,
+		shortID:       shortID,
+		spiderX:       spiderX,
 	}, nil
 }
 
@@ -311,6 +696,9 @@ func buildDownloadEndpoint(
 	mainAllowInsecure bool,
 	mainALPN string,
 	mainUtlsImitate string,
+	mainPublicKey string,
+	mainShortID string,
+	mainSpiderX string,
 	cfg *downloadSettingsConfig,
 ) (*endpoint, error) {
 	if cfg == nil {
@@ -319,7 +707,7 @@ func buildDownloadEndpoint(
 	if cfg.Network != "" && !strings.EqualFold(cfg.Network, "xhttp") {
 		return nil, fmt.Errorf("xhttp: downloadSettings network %q is not supported", cfg.Network)
 	}
-	if cfg.Security != "" && !strings.EqualFold(cfg.Security, "tls") {
+	if cfg.Security != "" && !strings.EqualFold(cfg.Security, "tls") && !strings.EqualFold(cfg.Security, "reality") {
 		return nil, fmt.Errorf("xhttp: downloadSettings security %q is not supported", cfg.Security)
 	}
 
@@ -361,13 +749,43 @@ func buildDownloadEndpoint(
 	}
 
 	utlsImitate := mainUtlsImitate
-	if cfg.TLSSettings.Fingerprint != "" {
+	if strings.EqualFold(cfg.Security, "reality") {
+		if cfg.RealitySettings.Fingerprint != "" {
+			utlsImitate = cfg.RealitySettings.Fingerprint
+		}
+	} else if cfg.TLSSettings.Fingerprint != "" {
 		utlsImitate = cfg.TLSSettings.Fingerprint
 	}
 
 	allowInsecure := mainAllowInsecure || cfg.TLSSettings.AllowInsecure
+	if strings.EqualFold(cfg.Security, "reality") {
+		allowInsecure = mainAllowInsecure
+	}
 
-	ep, err := newTLSEndpoint(option, nextDialer, addr, host, path, serverName, allowInsecure, alpn, utlsImitate)
+	security := cfg.Security
+	if security == "" {
+		security = "tls"
+	}
+
+	publicKey := mainPublicKey
+	shortID := mainShortID
+	spiderX := mainSpiderX
+	if strings.EqualFold(security, "reality") {
+		if cfg.RealitySettings.PublicKey != "" {
+			publicKey = cfg.RealitySettings.PublicKey
+		}
+		if cfg.RealitySettings.ShortID != "" {
+			shortID = cfg.RealitySettings.ShortID
+		}
+		if cfg.RealitySettings.SpiderX != "" {
+			spiderX = cfg.RealitySettings.SpiderX
+		}
+		if cfg.RealitySettings.ServerName != "" {
+			serverName = cfg.RealitySettings.ServerName
+		}
+	}
+
+	ep, err := newSecureEndpoint(option, nextDialer, addr, host, path, security, serverName, allowInsecure, alpn, utlsImitate, publicKey, shortID, spiderX)
 	if err != nil {
 		return nil, err
 	}
@@ -496,6 +914,12 @@ func (p *h2Pool) acquire(ctx context.Context, ep endpoint, opts xmuxOptions, ope
 		if !entry.h2Conn.CanTakeNewRequest() {
 			continue
 		}
+		if entry.leftRequests == 0 {
+			continue
+		}
+		if !entry.unreusableAt.IsZero() && time.Now().After(entry.unreusableAt) {
+			continue
+		}
 		if entry.maxConcurrency > 0 && entry.active >= entry.maxConcurrency {
 			continue
 		}
@@ -504,6 +928,9 @@ func (p *h2Pool) acquire(ctx context.Context, ep endpoint, opts xmuxOptions, ope
 		}
 		entry.active++
 		entry.reuseCount++
+		if entry.leftRequests > 0 {
+			entry.leftRequests--
+		}
 		p.mu.Unlock()
 		return &pooledH2Lease{
 			rawConn: entry.rawConn,
@@ -517,6 +944,15 @@ func (p *h2Pool) acquire(ctx context.Context, ep endpoint, opts xmuxOptions, ope
 	if err != nil {
 		return nil, err
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if opts.maxConnections > 0 && len(p.entries[key]) >= opts.maxConnections {
+		return &pooledH2Lease{
+			rawConn: rawConn,
+			h2Conn:  h2Conn,
+			release: func() error { return rawConn.Close() },
+		}, nil
+	}
 	entry := &h2PoolEntry{
 		rawConn:        rawConn,
 		h2Conn:         h2Conn,
@@ -524,10 +960,12 @@ func (p *h2Pool) acquire(ctx context.Context, ep endpoint, opts xmuxOptions, ope
 		reuseCount:     1,
 		maxConcurrency: opts.maxConcurrency,
 		maxReuseTimes:  opts.maxReuseTimes,
+		leftRequests:   opts.hMaxRequestTimes,
 	}
-	p.mu.Lock()
+	if opts.hMaxReusableSecs > 0 {
+		entry.unreusableAt = time.Now().Add(time.Duration(opts.hMaxReusableSecs) * time.Second)
+	}
 	p.entries[key] = append(p.entries[key], entry)
-	p.mu.Unlock()
 	return &pooledH2Lease{
 		rawConn: rawConn,
 		h2Conn:  h2Conn,
@@ -565,7 +1003,11 @@ func NewDialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link stri
 	}
 
 	query := u.Query()
-	mode, err := normalizeMode(query.Get("mode"), u.Scheme)
+	security := query.Get("security")
+	if security == "" && u.Scheme == "https" {
+		security = "tls"
+	}
+	mode, err := normalizeMode(query.Get("mode"), u.Scheme, security, strings.TrimSpace(query.Get("extra")) != "")
 	if err != nil {
 		return nil, err
 	}
@@ -589,12 +1031,15 @@ func NewDialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link stri
 
 	allowInsecure := query.Get("allowInsecure") == "true" || query.Get("allowInsecure") == "1"
 	utlsImitate := query.Get("utlsImitate")
+	publicKey := query.Get("pbk")
+	shortID := query.Get("sid")
+	spiderX := query.Get("spx")
 
-	uploadEndpoint, err := newTLSEndpoint(option, nextDialer, u.Host, host, u.Path, serverName, allowInsecure, alpn, utlsImitate)
+	uploadEndpoint, err := newSecureEndpoint(option, nextDialer, u.Host, host, u.Path, security, serverName, allowInsecure, alpn, utlsImitate, publicKey, shortID, spiderX)
 	if err != nil {
 		return nil, err
 	}
-	downloadEndpoint, err := buildDownloadEndpoint(option, nextDialer, u.Host, host, u.Path, serverName, allowInsecure, alpn, utlsImitate, extra.DownloadSettings)
+	downloadEndpoint, err := buildDownloadEndpoint(option, nextDialer, u.Host, host, u.Path, serverName, allowInsecure, alpn, utlsImitate, publicKey, shortID, spiderX, extra.DownloadSettings)
 	if err != nil {
 		return nil, err
 	}
@@ -618,6 +1063,20 @@ func NewDialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link stri
 		packetMaxBytes:   extra.ScMaxEachPostBytes.Pick(),
 		packetMinGap:     time.Duration(extra.ScMinPostsIntervalMs.Pick()) * time.Millisecond,
 		xmux:             parseXmux(extra.Xmux),
+		xPaddingBytes:    extra.XPaddingBytes,
+		xPaddingObfsMode: extra.XPaddingObfsMode,
+		xPaddingKey:      extra.XPaddingKey,
+		xPaddingHeader:   extra.XPaddingHeader,
+		xPaddingPlacement: extra.XPaddingPlacement,
+		xPaddingMethod:   extra.XPaddingMethod,
+		uplinkHTTPMethod: extra.UplinkHTTPMethod,
+		sessionPlacement: extra.SessionPlacement,
+		sessionKey:       extra.SessionKey,
+		seqPlacement:     extra.SeqPlacement,
+		seqKey:           extra.SeqKey,
+		uplinkDataPlacement: extra.UplinkDataPlacement,
+		uplinkDataKey:       extra.UplinkDataKey,
+		uplinkChunkSize:     extra.UplinkChunkSize,
 	}, nil
 }
 
@@ -642,12 +1101,12 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 	uploadTargetURL := (&url.URL{
 		Scheme: "https",
 		Host:   d.uploadEndpoint.addr,
-		Path:   strings.TrimRight(d.uploadEndpoint.path, "/") + "/" + sessionID,
+		Path:   d.uploadEndpoint.path,
 	}).String()
 	downloadTargetURL := (&url.URL{
 		Scheme: "https",
 		Host:   downloadEndpoint.addr,
-		Path:   strings.TrimRight(downloadEndpoint.path, "/") + "/" + sessionID,
+		Path:   downloadEndpoint.path,
 	}).String()
 
 	switch d.mode {
@@ -670,7 +1129,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			return nil, err
 		}
 		downloadReq.Host = downloadEndpoint.host
-		downloadReq.Header = d.headers.Clone()
+		d.prepareStreamRequest(downloadReq, sessionID)
 		downloadResp, err := downloadClient.rt.RoundTrip(downloadReq)
 		if err != nil {
 			_ = uploadClient.Close()
@@ -689,7 +1148,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		}
 
 		pr, pw := io.Pipe()
-		uploadReq, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadTargetURL, pr)
+				uploadReq, err := http.NewRequestWithContext(ctx, d.normalizedUplinkHTTPMethod(), uploadTargetURL, pr)
 		if err != nil {
 			downloadResp.Body.Close()
 			_ = uploadClient.Close()
@@ -699,10 +1158,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			return nil, err
 		}
 		uploadReq.Host = d.uploadEndpoint.host
-		uploadReq.Header = d.headers.Clone()
-		if d.contentType != "" {
-			uploadReq.Header.Set("Content-Type", d.contentType)
-		}
+		d.prepareStreamRequest(uploadReq, sessionID)
 
 		conn := &Conn{
 			uploadConn:   uploadClient.rawConn,
@@ -717,16 +1173,13 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		return conn, nil
 	case "stream-one":
 		pr, pw := io.Pipe()
-		uploadReq, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadTargetURL, pr)
+		uploadReq, err := http.NewRequestWithContext(ctx, d.normalizedUplinkHTTPMethod(), uploadTargetURL, pr)
 		if err != nil {
 			_ = uploadClient.Close()
 			return nil, err
 		}
 		uploadReq.Host = d.uploadEndpoint.host
-		uploadReq.Header = d.headers.Clone()
-		if d.contentType != "" {
-			uploadReq.Header.Set("Content-Type", d.contentType)
-		}
+		d.prepareStreamRequest(uploadReq, sessionID)
 
 		conn := &Conn{
 			uploadConn:   uploadClient.rawConn,
@@ -758,7 +1211,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			return nil, err
 		}
 		downloadReq.Host = downloadEndpoint.host
-		downloadReq.Header = d.headers.Clone()
+		d.prepareStreamRequest(downloadReq, sessionID)
 		downloadResp, err := downloadClient.rt.RoundTrip(downloadReq)
 		if err != nil {
 			_ = uploadClient.Close()
@@ -783,8 +1236,8 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			downloadRelease: downloadClient.Close,
 			sharedRelease: uploadClient == downloadClient,
 			downloadBody: downloadResp.Body,
-			packetUpload: d.buildPacketUploader(uploadClient.rt, uploadTargetURL),
-		}
+				packetUpload: d.buildPacketUploader(uploadClient.rt, uploadTargetURL, sessionID),
+			}
 		if d.xmux.enabled && !d.uploadEndpoint.useH3 {
 			_ = uploadClient.Close()
 			lease, err := globalPacketUploadPool.acquire(ctx, d.uploadEndpoint, d.xmux, d.openH2Conn)
@@ -794,8 +1247,8 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			}
 			conn.uploadConn = nil
 			conn.uploadRelease = lease.release
-			conn.packetUpload = d.buildPacketUploader(lease.h2Conn, uploadTargetURL)
-		}
+				conn.packetUpload = d.buildPacketUploader(lease.h2Conn, uploadTargetURL, sessionID)
+			}
 		return conn, nil
 	default:
 		_ = uploadClient.Close()
@@ -803,7 +1256,8 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 	}
 }
 
-func (d *Dialer) buildPacketUploader(uploadRT requestRoundTripper, uploadTargetURL string) func([]byte) error {
+func (d *Dialer) buildPacketUploader(uploadRT requestRoundTripper, uploadTargetURL string, sessionID string) func([]byte) error {
+	var seq uint64
 	return func(p []byte) error {
 		chunks := [][]byte{p}
 		if d.packetMaxBytes > 0 && len(p) > d.packetMaxBytes {
@@ -818,16 +1272,17 @@ func (d *Dialer) buildPacketUploader(uploadRT requestRoundTripper, uploadTargetU
 		}
 
 		for i, chunk := range chunks {
-			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, uploadTargetURL, bytes.NewReader(chunk))
+			req, err := http.NewRequestWithContext(context.Background(), d.normalizedUplinkHTTPMethod(), uploadTargetURL, nil)
 			if err != nil {
 				return err
 			}
 			req.Host = d.uploadEndpoint.host
-			req.Header = d.headers.Clone()
-			if d.contentType != "" {
-				req.Header.Set("Content-Type", d.contentType)
+			seqStr := strconv.FormatUint(seq, 10)
+			seq++
+			if err := d.preparePacketRequest(req, sessionID, seqStr, chunk); err != nil {
+				return err
 			}
-				resp, err := uploadRT.RoundTrip(req)
+			resp, err := uploadRT.RoundTrip(req)
 			if err != nil {
 				return err
 			}

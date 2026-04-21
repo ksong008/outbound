@@ -12,6 +12,7 @@ Main areas covered so far:
 - VLESS over TLS compatibility improvements
 - XTLS / VLESS troubleshooting conclusions
 - XHTTP support investigation and first implementation phase
+- real-node smoke harness preparation
 
 ## 1. VLESS version support attempt
 
@@ -139,6 +140,10 @@ Current status:
   - `packet-up` now honors:
     - `scMaxEachPostBytes`
     - `scMinPostsIntervalMs`
+  - request-shaping semantics now have dedicated coverage for:
+    - session placement
+    - sequence placement
+    - header / cookie uplink data placement
 - `extra.downloadSettings` now has limited support:
   - downstream can be split to a separate `xhttp + tls` endpoint
   - this is currently a constrained subset, not full Xray parity
@@ -148,11 +153,26 @@ Current status:
   - currently honors:
     - `maxConcurrency`
     - `cMaxReuseTimes`
+- `xhttp + reality` is now wired into the outbound chain:
+  - top-level VLESS xhttp links can pass `security=reality`
+  - `auto` now resolves to:
+    - `stream-one` for reality without `downloadSettings`
+    - `stream-up` for reality with `downloadSettings`
+  - export / parse now preserve the required reality fields for xhttp links
+- request shaping has been pushed closer to Xray semantics:
+  - `sessionPlacement / sessionKey`
+  - `seqPlacement / seqKey`
+  - `uplinkHTTPMethod`
+  - `uplinkDataPlacement / uplinkDataKey / uplinkChunkSize`
+  - xpadding request placement and method handling
 - H3 / QUIC now has an initial execution path:
   - when ALPN is exactly `h3`, xhttp requests switch to an HTTP/3 transport backend
   - this is currently limited, but no longer just compile coverage
   - a local real HTTP/3 `stream-one` integration test now passes
   - a local real HTTP/3 `auto -> stream-up` integration test now passes
+  - real external smoke still shows:
+    - `h2` path working
+    - `h3` path timing out even after service-side H3 enablement, suggesting remaining parity gaps and/or external UDP path issues
 
 Important limitation:
 - this is still **not** full Xray-compatible xhttp support
@@ -191,4 +211,31 @@ At the time of this memo:
   - `7761cda` VLESS TLS fingerprint / ALPN support
 - `origin/personal/stable` does **not** include:
   - VLESS version support
-- local working tree currently contains uncommitted phase 1 xhttp support work
+- real VPS smoke summary at this point:
+  - `h2` external xhttp node: PASS
+  - `h3` external xhttp node: FAIL (timeout)
+- local working tree currently contains uncommitted expanded xhttp compatibility work
+
+## 7. Real-node smoke harness
+
+Local utility added:
+- `hack/xhttp_smoke.go`
+
+Purpose:
+- run protocol-level smoke tests against real external xhttp nodes
+- validate the complete outbound chain instead of only local mock servers
+
+Current behavior:
+- reads links from:
+  - `XHTTP_SMOKE_LINKS`
+  - or `XHTTP_SMOKE_FILE`
+- dials each link through `outbound/dialer.NewNetproxyDialerFromLink(...)`
+- sends a minimal HTTP request
+- prints a tabular result summary
+
+Default target:
+- `clients3.google.com:80`
+
+Status:
+- compiles locally
+- not yet exercised against a real node list in this cycle

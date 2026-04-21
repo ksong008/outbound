@@ -250,7 +250,7 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 			sni = s.Add
 		}
 		scheme := "http"
-		if s.TLS == "tls" {
+		if s.TLS == "tls" || s.TLS == "reality" {
 			scheme = "https"
 		}
 		utlsImitate := option.UtlsImitate
@@ -267,9 +267,14 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 				"allowInsecure":     []string{common.BoolToString(s.AllowInsecure || option.AllowInsecure)},
 				"tlsImplementation": []string{option.TlsImplementation},
 				"utlsImitate":       []string{utlsImitate},
+				"security":          []string{s.TLS},
 				"alpn":              []string{s.Alpn},
 				"mode":              []string{s.XHTTPMode},
 				"extra":             []string{s.XHTTPExtra},
+				"fp":                []string{s.Fingerprint},
+				"pbk":               []string{s.PublicKey},
+				"sid":               []string{s.ShortId},
+				"spx":               []string{s.SpiderX},
 			}.Encode(),
 		}
 		d, err = xhttp.NewDialer(option, d, u.String())
@@ -461,6 +466,11 @@ func (s *V2Ray) ExportToURL() string {
 			common.SetValue(&query, "flow", s.Flow)
 			common.SetValue(&query, "fp", s.Fingerprint)
 			common.SetValue(&query, "allowInsecure", common.BoolToString(s.AllowInsecure))
+			if s.TLS == "reality" {
+				common.SetValue(&query, "pbk", s.PublicKey)
+				common.SetValue(&query, "sid", s.ShortId)
+				common.SetValue(&query, "spx", s.SpiderX)
+			}
 		}
 
 		U := url.URL{

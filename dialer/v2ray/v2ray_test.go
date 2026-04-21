@@ -111,3 +111,55 @@ func TestExportVlessURLXHTTP(t *testing.T) {
 		t.Fatalf("expected exported URL to contain allowInsecure=1, got %q", exported)
 	}
 }
+
+func TestParseVlessURLXHTTPReality(t *testing.T) {
+	cfg, err := ParseVlessURL("vless://uuid@example.com:443?type=xhttp&security=reality&host=example.com&path=%2Fx&mode=auto&sni=server.example&fp=chrome&pbk=pubkey&sid=abcd&spx=%2F#xhttp-reality")
+	if err != nil {
+		t.Fatalf("ParseVlessURL returned error: %v", err)
+	}
+	if cfg.TLS != "reality" {
+		t.Fatalf("expected security reality, got %q", cfg.TLS)
+	}
+	if cfg.XHTTPMode != "auto" {
+		t.Fatalf("expected xhttp mode auto, got %q", cfg.XHTTPMode)
+	}
+	if cfg.Fingerprint != "chrome" {
+		t.Fatalf("expected fingerprint chrome, got %q", cfg.Fingerprint)
+	}
+	if cfg.PublicKey != "pubkey" {
+		t.Fatalf("expected public key pubkey, got %q", cfg.PublicKey)
+	}
+	if cfg.ShortId != "abcd" {
+		t.Fatalf("expected short id abcd, got %q", cfg.ShortId)
+	}
+	if cfg.SpiderX != "/" {
+		t.Fatalf("expected spider x /, got %q", cfg.SpiderX)
+	}
+}
+
+func TestExportVlessURLXHTTPReality(t *testing.T) {
+	cfg := &V2Ray{
+		Ps:          "xhttp-reality",
+		Add:         "example.com",
+		Port:        "443",
+		ID:          "uuid",
+		Net:         "xhttp",
+		Host:        "example.com",
+		Path:        "/x",
+		TLS:         "reality",
+		SNI:         "server.example",
+		Fingerprint: "chrome",
+		PublicKey:   "pubkey",
+		ShortId:     "abcd",
+		SpiderX:     "/",
+		XHTTPMode:   "auto",
+		Protocol:    "vless",
+	}
+
+	exported := cfg.ExportToURL()
+	for _, fragment := range []string{"type=xhttp", "security=reality", "fp=chrome", "pbk=pubkey", "sid=abcd", "spx=%2F"} {
+		if !strings.Contains(exported, fragment) {
+			t.Fatalf("expected exported URL to contain %q, got %q", fragment, exported)
+		}
+	}
+}

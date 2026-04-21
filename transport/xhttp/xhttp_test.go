@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"path"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -45,6 +46,8 @@ func TestNormalizeMode(t *testing.T) {
 		{name: "stream-up", mode: "stream-up", scheme: "https", want: "stream-up"},
 		{name: "stream-one over https", mode: "stream-one", scheme: "https", want: "stream-one"},
 		{name: "packet-up over https", mode: "packet-up", scheme: "https", want: "packet-up"},
+		{name: "auto over reality without download", mode: "auto", scheme: "https", want: "stream-one", wantErr: false},
+		{name: "auto over reality with download", mode: "auto", scheme: "https", want: "stream-up", wantErr: false},
 		{name: "auto over http unsupported", mode: "auto", scheme: "http", wantErr: true},
 		{name: "stream-one over http unsupported", mode: "stream-one", scheme: "http", wantErr: true},
 		{name: "packet-up over http unsupported", mode: "packet-up", scheme: "http", wantErr: true},
@@ -52,7 +55,18 @@ func TestNormalizeMode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := normalizeMode(tt.mode, tt.scheme)
+			security := "tls"
+			if tt.scheme == "http" {
+				security = "none"
+			}
+			hasDownload := false
+			if strings.Contains(tt.name, "reality") {
+				security = "reality"
+			}
+			if strings.Contains(tt.name, "with download") {
+				hasDownload = true
+			}
+			got, err := normalizeMode(tt.mode, tt.scheme, security, hasDownload)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got mode %q", got)
@@ -112,6 +126,97 @@ func TestShouldUseH3(t *testing.T) {
 			t.Fatalf("shouldUseH3(%q) = %v, want %v", tt.alpn, got, tt.want)
 		}
 	}
+}
+
+func TestApplyMetaToRequestPlacements(t *testing.T) {
+	t.Run("header placement", func(t *testing.T) {
+		d := &Dialer{sessionPlacement: "header", seqPlacement: "header"}
+		req, _ := http.NewRequest(http.MethodGet, "https://example.com/x", nil)
+		req.Header = make(http.Header)
+		d.applyMetaToRequest(req, "sess", "7")
+		if got := req.Header.Get("X-Session"); got != "sess" {
+			t.Fatalf("expected X-Session=sess, got %q", got)
+		}
+		if got := req.Header.Get("X-Seq"); got != "7" {
+			t.Fatalf("expected X-Seq=7, got %q", got)
+		}
+	})
+
+	t.Run("query placement", func(t *testing.T) {
+		d := &Dialer{sessionPlacement: "query", seqPlacement: "query"}
+		req, _ := http.NewRequest(http.MethodGet, "https://example.com/x", nil)
+		req.Header = make(http.Header)
+		d.applyMetaToRequest(req, "sess", "7")
+		if got := req.URL.Query().Get("x_session"); got != "sess" {
+			t.Fatalf("expected x_session=sess, got %q", got)
+		}
+		if got := req.URL.Query().Get("x_seq"); got != "7" {
+			t.Fatalf("expected x_seq=7, got %q", got)
+		}
+	})
+
+	t.Run("cookie placement", func(t *testing.T) {
+		d := &Dialer{sessionPlacement: "cookie", seqPlacement: "cookie"}
+		req, _ := http.NewRequest(http.MethodGet, "https://example.com/x", nil)
+		req.Header = make(http.Header)
+		d.applyMetaToRequest(req, "sess", "7")
+		cookies := req.Cookies()
+		if len(cookies) != 2 {
+			t.Fatalf("expected 2 cookies, got %d", len(cookies))
+		}
+	})
+
+	t.Run("path placement", func(t *testing.T) {
+		d := &Dialer{}
+		req, _ := http.NewRequest(http.MethodGet, "https://example.com/x", nil)
+		req.Header = make(http.Header)
+		d.applyMetaToRequest(req, "sess", "7")
+		if got := req.URL.Path; got != "/x/sess/7" {
+			t.Fatalf("expected path /x/sess/7, got %q", got)
+		}
+	})
+}
+
+func TestPreparePacketRequestPlacements(t *testing.T) {
+	payload := []byte("hello-world")
+
+	t.Run("header data placement", func(t *testing.T) {
+		d := &Dialer{
+			headers:             make(http.Header),
+			uplinkDataPlacement: "header",
+			uplinkDataKey:       "X-Data",
+			uplinkChunkSize:     rangedInt{set: true, min: 5, max: 5},
+		}
+		req, _ := http.NewRequest(http.MethodPost, "https://example.com/x", nil)
+		if err := d.preparePacketRequest(req, "sess", "3", payload); err != nil {
+			t.Fatalf("preparePacketRequest error: %v", err)
+		}
+		if req.Body != nil {
+			t.Fatalf("expected header placement to avoid request body")
+		}
+		if req.Header.Get("X-Data-0") == "" {
+			t.Fatalf("expected X-Data-0 header to be set")
+		}
+		if req.URL.Path != "/x/sess/3" {
+			t.Fatalf("expected path placement to apply metadata, got %q", req.URL.Path)
+		}
+	})
+
+	t.Run("cookie data placement", func(t *testing.T) {
+		d := &Dialer{
+			headers:             make(http.Header),
+			uplinkDataPlacement: "cookie",
+			uplinkDataKey:       "x_data",
+			uplinkChunkSize:     rangedInt{set: true, min: 5, max: 5},
+		}
+		req, _ := http.NewRequest(http.MethodPost, "https://example.com/x", nil)
+		if err := d.preparePacketRequest(req, "sess", "3", payload); err != nil {
+			t.Fatalf("preparePacketRequest error: %v", err)
+		}
+		if len(req.Cookies()) == 0 {
+			t.Fatalf("expected cookies to be set")
+		}
+	})
 }
 
 func generateSelfSignedCert(t *testing.T) tls.Certificate {
