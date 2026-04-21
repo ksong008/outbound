@@ -29,6 +29,8 @@ require (
 	google.golang.org/protobuf v1.36.1
 )
 
+replace github.com/daeuniverse/quic-go => github.com/ksong008/quic-go v0.0.0-20260419080117-578539b67bcc
+
 require (
 	github.com/andybalholm/brotli v1.0.6 // indirect
 	github.com/awnumar/memcall v0.0.0-20190816154910-db5ea08008a3 // indirect
