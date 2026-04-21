@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -53,7 +54,7 @@ type Dialer struct {
 	uplinkDataKey       string
 	uplinkChunkSize     rangedInt
 	h3ClientMu       sync.Mutex
-	h3Clients        map[string]*requestClient
+	h3Clients        map[string][]*h3ClientEntry
 }
 
 type extraConfig struct {
@@ -857,6 +858,15 @@ func (c *requestClient) IsClosed() bool {
 type requestClientLease struct {
 	client  *requestClient
 	release func() error
+	consumeRequest func()
+}
+
+type h3ClientEntry struct {
+	client        *requestClient
+	active        int
+	leftUsage     int
+	leftRequests  int
+	unreusableAt  time.Time
 }
 
 func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network string) (*requestClient, error) {
@@ -937,15 +947,73 @@ func requestClientPoolKey(ep endpoint, network string) string {
 	}, "|")
 }
 
-func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network string) (*requestClientLease, error) {
+func newH3ClientEntry(client *requestClient, opts xmuxOptions) *h3ClientEntry {
+	entry := &h3ClientEntry{
+		client:       client,
+		leftUsage:    -1,
+		leftRequests: math.MaxInt32,
+	}
+	if opts.maxReuseTimes > 0 {
+		entry.leftUsage = opts.maxReuseTimes - 1
+	}
+	if opts.hMaxRequestTimes > 0 {
+		entry.leftRequests = opts.hMaxRequestTimes
+	}
+	if opts.hMaxReusableSecs > 0 {
+		entry.unreusableAt = time.Now().Add(time.Duration(opts.hMaxReusableSecs) * time.Second)
+	}
+	return entry
+}
+
+func (e *h3ClientEntry) reusable(now time.Time) bool {
+	if e == nil || e.client == nil || e.client.IsClosed() {
+		return false
+	}
+	if e.leftUsage == 0 {
+		return false
+	}
+	if e.leftRequests <= 0 {
+		return false
+	}
+	if !e.unreusableAt.IsZero() && now.After(e.unreusableAt) {
+		return false
+	}
+	return true
+}
+
+func (d *Dialer) releaseH3Client(key string, entry *h3ClientEntry) error {
+	d.h3ClientMu.Lock()
+	defer d.h3ClientMu.Unlock()
+	entries := d.h3Clients[key]
+	for i, candidate := range entries {
+		if candidate != entry {
+			continue
+		}
+		if candidate.active > 0 {
+			candidate.active--
+		}
+		if candidate.active == 0 && !candidate.reusable(time.Now()) {
+			_ = candidate.client.Close()
+			d.h3Clients[key] = append(entries[:i], entries[i+1:]...)
+			if len(d.h3Clients[key]) == 0 {
+				delete(d.h3Clients, key)
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
+func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network string, opts xmuxOptions) (*requestClientLease, error) {
 	if !ep.useH3 {
 		client, err := d.openRequestClient(ctx, ep, network)
 		if err != nil {
 			return nil, err
 		}
 		return &requestClientLease{
-			client:  client,
-			release: client.Close,
+			client:         client,
+			release:        client.Close,
+			consumeRequest: func() {},
 		}, nil
 	}
 
@@ -953,22 +1021,77 @@ func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network 
 	d.h3ClientMu.Lock()
 	defer d.h3ClientMu.Unlock()
 	if d.h3Clients == nil {
-		d.h3Clients = make(map[string]*requestClient)
+		d.h3Clients = make(map[string][]*h3ClientEntry)
 	}
-	if client := d.h3Clients[key]; client != nil && !client.IsClosed() {
+	now := time.Now()
+	entries := d.h3Clients[key]
+	filtered := entries[:0]
+	eligible := make([]*h3ClientEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry == nil || entry.client == nil {
+			continue
+		}
+		retired := !entry.reusable(now)
+		if entry.active == 0 && retired {
+			_ = entry.client.Close()
+			continue
+		}
+		filtered = append(filtered, entry)
+		if retired {
+			continue
+		}
+		if opts.maxConcurrency > 0 && entry.active >= opts.maxConcurrency {
+			continue
+		}
+		eligible = append(eligible, entry)
+	}
+	d.h3Clients[key] = filtered
+
+	shouldCreate := len(filtered) == 0
+	if !shouldCreate && opts.maxConnections > 0 && len(filtered) < opts.maxConnections {
+		shouldCreate = true
+	}
+	if !shouldCreate && len(eligible) == 0 {
+		shouldCreate = true
+	}
+	if shouldCreate {
+		client, err := d.openRequestClient(ctx, ep, network)
+		if err != nil {
+			return nil, err
+		}
+		entry := newH3ClientEntry(client, opts)
+		entry.active = 1
+		if entry.leftUsage > 0 {
+			entry.leftUsage--
+		}
+		d.h3Clients[key] = append(d.h3Clients[key], entry)
 		return &requestClientLease{
 			client:  client,
-			release: func() error { return nil },
+			release: func() error { return d.releaseH3Client(key, entry) },
+			consumeRequest: func() {
+				d.h3ClientMu.Lock()
+				defer d.h3ClientMu.Unlock()
+				if entry.leftRequests > 0 && entry.leftRequests != math.MaxInt32 {
+					entry.leftRequests--
+				}
+			},
 		}, nil
 	}
-	client, err := d.openRequestClient(ctx, ep, network)
-	if err != nil {
-		return nil, err
+	entry := eligible[0]
+	entry.active++
+	if entry.leftUsage > 0 {
+		entry.leftUsage--
 	}
-	d.h3Clients[key] = client
 	return &requestClientLease{
-		client:  client,
-		release: func() error { return nil },
+		client:  entry.client,
+		release: func() error { return d.releaseH3Client(key, entry) },
+		consumeRequest: func() {
+			d.h3ClientMu.Lock()
+			defer d.h3ClientMu.Unlock()
+			if entry.leftRequests > 0 && entry.leftRequests != math.MaxInt32 {
+				entry.leftRequests--
+			}
+		},
 	}, nil
 }
 
@@ -1169,7 +1292,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 	if magicNetwork.Network != "tcp" {
 		return nil, fmt.Errorf("%w: xhttp+%s", netproxy.UnsupportedTunnelTypeError, magicNetwork.Network)
 	}
-	uploadLease, err := d.acquireRequestClient(ctx, d.uploadEndpoint, network)
+	uploadLease, err := d.acquireRequestClient(ctx, d.uploadEndpoint, network, d.xmux)
 	if err != nil {
 		return nil, err
 	}
@@ -1197,7 +1320,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		downloadClient := uploadClient
 		downloadLease := uploadLease
 		if d.downloadEndpoint != nil {
-			downloadLease, err = d.acquireRequestClient(ctx, downloadEndpoint, network)
+			downloadLease, err = d.acquireRequestClient(ctx, downloadEndpoint, network, d.xmux)
 			if err != nil {
 				_ = uploadLease.release()
 				return nil, err
@@ -1215,6 +1338,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		}
 		downloadReq.Host = downloadEndpoint.host
 		d.prepareStreamRequest(downloadReq, sessionID)
+		downloadLease.consumeRequest()
 		downloadResp, err := downloadClient.RoundTrip(downloadReq)
 		if err != nil {
 			_ = uploadLease.release()
@@ -1244,6 +1368,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		}
 		uploadReq.Host = d.uploadEndpoint.host
 		d.prepareStreamRequest(uploadReq, sessionID)
+		uploadLease.consumeRequest()
 
 		conn := &Conn{
 			uploadConn:   uploadClient.rawConn,
@@ -1272,6 +1397,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		}
 		uploadReq.Host = d.uploadEndpoint.host
 		d.prepareStreamRequest(uploadReq, sessionID)
+		uploadLease.consumeRequest()
 
 		conn := &Conn{
 			uploadConn:   uploadClient.rawConn,
@@ -1289,7 +1415,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		downloadClient := uploadClient
 		downloadLease := uploadLease
 		if d.downloadEndpoint != nil {
-			downloadLease, err = d.acquireRequestClient(ctx, downloadEndpoint, network)
+			downloadLease, err = d.acquireRequestClient(ctx, downloadEndpoint, network, d.xmux)
 			if err != nil {
 				_ = uploadLease.release()
 				return nil, err
@@ -1307,6 +1433,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		}
 		downloadReq.Host = downloadEndpoint.host
 		d.prepareStreamRequest(downloadReq, sessionID)
+		downloadLease.consumeRequest()
 
 		conn := &Conn{
 			uploadConn:   uploadClient.rawConn,
@@ -1318,30 +1445,47 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			respCh:        make(chan responseResult, 1),
 		}
 		packetFlushDelay := 15 * time.Millisecond
-		if uploadClient == downloadClient {
-			releaseGroup := newSharedReleaseGroup(2, uploadLease.release)
-			uploader := newPacketBatchUploader(
-				requestCtx,
-				uploadClient,
-				uploadTargetURL,
-				d.uploadEndpoint.host,
-				d,
-				sessionID,
-				d.packetMaxBytes,
-				d.packetMinGap,
-				packetFlushDelay,
-			)
-			conn.packetUpload = uploader.enqueue
-			conn.packetClose = func() error {
-				err := uploader.close()
-				releaseGroup.Done()
-				return err
+		usePerRequestH3Upload := d.uploadEndpoint.useH3
+		var acquireUpload func() (*requestClientLease, error)
+		if usePerRequestH3Upload {
+			acquireUpload = func() (*requestClientLease, error) {
+				return d.acquireRequestClient(requestCtx, d.uploadEndpoint, network, d.xmux)
 			}
-			go conn.startDownload(downloadClient, downloadReq, releaseGroup.Done)
-		} else {
+		}
+		if uploadClient == downloadClient {
 			uploader := newPacketBatchUploader(
 				requestCtx,
 				uploadClient,
+				acquireUpload,
+				uploadTargetURL,
+				d.uploadEndpoint.host,
+				d,
+				sessionID,
+				d.packetMaxBytes,
+				d.packetMinGap,
+				packetFlushDelay,
+			)
+			conn.packetUpload = uploader.enqueue
+			if usePerRequestH3Upload {
+				conn.packetClose = func() error { return uploader.close() }
+				go conn.startDownload(downloadClient, downloadReq, func() { _ = downloadLease.release() })
+			} else {
+				releaseGroup := newSharedReleaseGroup(2, uploadLease.release)
+				conn.packetClose = func() error {
+					err := uploader.close()
+					releaseGroup.Done()
+					return err
+				}
+				go conn.startDownload(downloadClient, downloadReq, releaseGroup.Done)
+			}
+		} else {
+			if usePerRequestH3Upload {
+				_ = uploadLease.release()
+			}
+			uploader := newPacketBatchUploader(
+				requestCtx,
+				uploadClient,
+				acquireUpload,
 				uploadTargetURL,
 				d.uploadEndpoint.host,
 				d,
@@ -1353,7 +1497,9 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			conn.packetUpload = uploader.enqueue
 			conn.packetClose = func() error {
 				err := uploader.close()
-				_ = uploadLease.release()
+				if !usePerRequestH3Upload {
+					_ = uploadLease.release()
+				}
 				return err
 			}
 			go conn.startDownload(downloadClient, downloadReq, func() { _ = downloadLease.release() })
@@ -1370,6 +1516,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			xmuxUploader := newPacketBatchUploader(
 				requestCtx,
 				lease.h2Conn,
+				nil,
 				uploadTargetURL,
 				d.uploadEndpoint.host,
 				d,
@@ -1527,6 +1674,7 @@ type packetBatchUploader struct {
 	seq           uint64
 	reqCtx        context.Context
 	uploadRT      requestRoundTripper
+	acquireUpload func() (*requestClientLease, error)
 	uploadTargetURL string
 	host          string
 	dialer        *Dialer
@@ -1536,6 +1684,7 @@ type packetBatchUploader struct {
 func newPacketBatchUploader(
 	reqCtx context.Context,
 	uploadRT requestRoundTripper,
+	acquireUpload func() (*requestClientLease, error),
 	uploadTargetURL string,
 	host string,
 	dialer *Dialer,
@@ -1550,6 +1699,7 @@ func newPacketBatchUploader(
 		minGap:          minGap,
 		reqCtx:          reqCtx,
 		uploadRT:        uploadRT,
+		acquireUpload:   acquireUpload,
 		uploadTargetURL: uploadTargetURL,
 		host:            host,
 		dialer:          dialer,
@@ -1628,8 +1778,22 @@ func (u *packetBatchUploader) run() {
 			u.setErr(err)
 			return
 		}
-		resp, err := u.uploadRT.RoundTrip(req)
+		rt := u.uploadRT
+		var lease *requestClientLease
+		if u.acquireUpload != nil {
+			lease, err = u.acquireUpload()
+			if err != nil {
+				u.setErr(err)
+				return
+			}
+			lease.consumeRequest()
+			rt = lease.client
+		}
+		resp, err := rt.RoundTrip(req)
 		if err != nil {
+			if lease != nil {
+				_ = lease.release()
+			}
 			u.setErr(err)
 			return
 		}
@@ -1637,6 +1801,9 @@ func (u *packetBatchUploader) run() {
 			defer resp.Body.Close()
 			_, _ = io.Copy(io.Discard, resp.Body)
 		}()
+		if lease != nil {
+			_ = lease.release()
+		}
 		if resp.StatusCode != http.StatusOK {
 			u.setErr(fmt.Errorf("xhttp: packet-up path returned %s", resp.Status))
 			return

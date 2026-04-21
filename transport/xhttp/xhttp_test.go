@@ -232,11 +232,11 @@ func TestAcquireRequestClientReusesH3Transport(t *testing.T) {
 		useH3:      true,
 	}
 
-	lease1, err := d.acquireRequestClient(context.Background(), ep, "tcp")
+	lease1, err := d.acquireRequestClient(context.Background(), ep, "tcp", xmuxOptions{})
 	if err != nil {
 		t.Fatalf("first acquireRequestClient failed: %v", err)
 	}
-	lease2, err := d.acquireRequestClient(context.Background(), ep, "tcp")
+	lease2, err := d.acquireRequestClient(context.Background(), ep, "tcp", xmuxOptions{})
 	if err != nil {
 		t.Fatalf("second acquireRequestClient failed: %v", err)
 	}
