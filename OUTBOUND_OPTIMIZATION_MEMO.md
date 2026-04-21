@@ -170,9 +170,10 @@ Current status:
   - this is currently limited, but no longer just compile coverage
   - a local real HTTP/3 `stream-one` integration test now passes
   - a local real HTTP/3 `auto -> stream-up` integration test now passes
-  - real external smoke still shows:
+  - real external smoke on a dedicated test VPS now shows:
     - `h2` path working
-    - `h3` path timing out even after service-side H3 enablement, suggesting remaining parity gaps and/or external UDP path issues
+    - `h3` path working
+  - an older Oracle test VPS still shows an `h3` single-host issue, but this no longer blocks the overall implementation assessment
 
 Important limitation:
 - this is still **not** full Xray-compatible xhttp support
@@ -212,9 +213,13 @@ At the time of this memo:
 - `origin/personal/stable` does **not** include:
   - VLESS version support
 - real VPS smoke summary at this point:
-  - `h2` external xhttp node: PASS
-  - `h3` external xhttp node: FAIL (timeout)
-- local working tree currently contains uncommitted expanded xhttp compatibility work
+  - dedicated test VPS:
+    - `h2` external xhttp node: PASS
+    - `h3` external xhttp node: PASS
+  - Oracle VPS:
+    - `h2` external xhttp node: PASS
+    - `h3` external xhttp node: still failing
+- local working tree currently contains the finalized smoke harness updates
 
 ## 7. Real-node smoke harness
 
@@ -238,4 +243,4 @@ Default target:
 
 Status:
 - compiles locally
-- not yet exercised against a real node list in this cycle
+- exercised against real external xhttp nodes in this cycle

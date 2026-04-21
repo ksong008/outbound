@@ -124,7 +124,11 @@ func smokeLink(link, target string) result {
 	}
 	line := strings.SplitN(string(buf[:n]), "\r\n", 2)[0]
 	if !strings.Contains(line, "HTTP/") {
-		return result{Name: name, Mode: mode, ALPN: alpn, Result: "FAIL", Note: "no HTTP status line"}
+		note := fmt.Sprintf("no HTTP status line: %q", string(buf[:n]))
+		if n == 0 {
+			note = "no HTTP status line: empty response"
+		}
+		return result{Name: name, Mode: mode, ALPN: alpn, Result: "FAIL", Note: note}
 	}
 	return result{
 		Name:    name,
