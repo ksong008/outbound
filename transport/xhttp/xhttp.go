@@ -1168,9 +1168,16 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			downloadRelease: downloadClient.Close,
 			sharedRelease: uploadClient == downloadClient,
 			uploadBody:   pw,
-			downloadBody: downloadResp.Body,
+			releaseWithBodies: true,
 		}
-		go conn.finishUpload(uploadClient.rt, uploadReq)
+		if uploadClient == downloadClient {
+			releaseGroup := newSharedReleaseGroup(2, uploadClient.Close)
+			conn.downloadBody = wrapManagedReadCloser(downloadResp.Body, releaseGroup.Done)
+			go conn.finishUpload(uploadClient.rt, uploadReq, releaseGroup.Done)
+		} else {
+			conn.downloadBody = wrapManagedReadCloser(downloadResp.Body, func() { _ = downloadClient.Close() })
+			go conn.finishUpload(uploadClient.rt, uploadReq, func() { _ = uploadClient.Close() })
+		}
 		return conn, nil
 	case "stream-one":
 		pr, pw := io.Pipe()
@@ -1188,10 +1195,11 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			uploadRelease: uploadClient.Close,
 			downloadRelease: uploadClient.Close,
 			sharedRelease: true,
+			releaseWithBodies: true,
 			uploadBody:   pw,
 			respCh:       make(chan responseResult, 1),
 		}
-		go conn.startStreamOne(uploadClient.rt, uploadReq)
+		go conn.startStreamOne(uploadClient.rt, uploadReq, func() { _ = uploadClient.Close() })
 		return conn, nil
 	case "packet-up":
 		downloadClient := uploadClient
@@ -1308,6 +1316,7 @@ type Conn struct {
 	uploadRelease func() error
 	downloadRelease func() error
 	sharedRelease bool
+	releaseWithBodies bool
 	uploadBody   *io.PipeWriter
 	downloadBody io.ReadCloser
 	packetUpload func([]byte) error
@@ -1323,7 +1332,61 @@ type responseResult struct {
 	err  error
 }
 
-func (c *Conn) finishUpload(rt requestRoundTripper, req *http.Request) {
+type managedReadCloser struct {
+	io.ReadCloser
+	once    sync.Once
+	onClose func()
+}
+
+func (m *managedReadCloser) Close() error {
+	err := m.ReadCloser.Close()
+	m.once.Do(func() {
+		if m.onClose != nil {
+			m.onClose()
+		}
+	})
+	return err
+}
+
+type sharedReleaseGroup struct {
+	mu        sync.Mutex
+	remaining int
+	release   func() error
+}
+
+func newSharedReleaseGroup(remaining int, release func() error) *sharedReleaseGroup {
+	return &sharedReleaseGroup{remaining: remaining, release: release}
+}
+
+func (g *sharedReleaseGroup) Done() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.remaining <= 0 {
+		return
+	}
+	g.remaining--
+	if g.remaining == 0 && g.release != nil {
+		_ = g.release()
+	}
+}
+
+func wrapManagedReadCloser(rc io.ReadCloser, onClose func()) io.ReadCloser {
+	if rc == nil {
+		return nil
+	}
+	return &managedReadCloser{
+		ReadCloser: rc,
+		onClose:    onClose,
+	}
+}
+
+func (c *Conn) finishUpload(rt requestRoundTripper, req *http.Request, onDone func()) {
+	if onDone != nil {
+		defer onDone()
+	}
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
 		c.uploadErr = err
@@ -1336,18 +1399,24 @@ func (c *Conn) finishUpload(rt requestRoundTripper, req *http.Request) {
 	}
 }
 
-func (c *Conn) startStreamOne(rt requestRoundTripper, req *http.Request) {
+func (c *Conn) startStreamOne(rt requestRoundTripper, req *http.Request, onDone func()) {
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
+		if onDone != nil {
+			onDone()
+		}
 		c.respCh <- responseResult{err: err}
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
+		if onDone != nil {
+			onDone()
+		}
 		c.respCh <- responseResult{err: fmt.Errorf("xhttp: stream-one path returned %s", resp.Status)}
 		return
 	}
-	c.respCh <- responseResult{body: resp.Body}
+	c.respCh <- responseResult{body: wrapManagedReadCloser(resp.Body, onDone)}
 }
 
 func (c *Conn) ensureDownloadBody() error {
@@ -1403,6 +1472,9 @@ func (c *Conn) Close() error {
 		if c.downloadBody != nil {
 			_ = c.downloadBody.Close()
 		}
+		if c.releaseWithBodies {
+			return
+		}
 		if c.uploadRelease != nil {
 			err = c.uploadRelease()
 		} else if c.uploadConn != nil {
@@ -1418,28 +1490,15 @@ func (c *Conn) Close() error {
 }
 
 func (c *Conn) SetDeadline(t time.Time) error {
-	var err error
-	if c.uploadConn != nil {
-		err = c.uploadConn.SetDeadline(t)
-	}
-	if c.downloadConn != nil && c.downloadConn != c.uploadConn {
-		if derr := c.downloadConn.SetDeadline(t); err == nil {
-			err = derr
-		}
-	}
-	return err
+	// Match Xray's splitConn behavior: per-stream deadlines don't map cleanly
+	// onto the underlying shared HTTP transport, so treat them as best-effort no-ops.
+	return nil
 }
 
 func (c *Conn) SetReadDeadline(t time.Time) error {
-	if c.downloadConn == nil {
-		return nil
-	}
-	return c.downloadConn.SetReadDeadline(t)
+	return nil
 }
 
 func (c *Conn) SetWriteDeadline(t time.Time) error {
-	if c.uploadConn == nil {
-		return nil
-	}
-	return c.uploadConn.SetWriteDeadline(t)
+	return nil
 }
