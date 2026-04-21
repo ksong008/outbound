@@ -553,3 +553,104 @@ func TestDownloadSettingsSplitStreamUpIntegration(t *testing.T) {
 		t.Fatalf("unexpected echo: got %q want %q", string(buf), string(payload))
 	}
 }
+
+func TestStreamUpSurvivesDialContextCancellation(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		sessions = make(map[string]*h3Session)
+	)
+	getSession := func(key string) *h3Session {
+		key = path.Base(key)
+		mu.Lock()
+		defer mu.Unlock()
+		if sess, ok := sessions[key]; ok {
+			return sess
+		}
+		pr, pw := io.Pipe()
+		sess := &h3Session{reader: pr, writer: pw}
+		sessions[key] = sess
+		return sess
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sess := getSession(r.URL.Path)
+		switch r.Method {
+		case http.MethodGet:
+			flusher, _ := w.(http.Flusher)
+			w.WriteHeader(http.StatusOK)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			buf := make([]byte, 32*1024)
+			for {
+				n, err := sess.reader.Read(buf)
+				if n > 0 {
+					if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+						return
+					}
+					if flusher != nil {
+						flusher.Flush()
+					}
+				}
+				if err != nil {
+					return
+				}
+			}
+		case http.MethodPost:
+			defer sess.writer.Close()
+			if _, err := io.Copy(sess.writer, r.Body); err != nil {
+				t.Logf("stream-up copy error: %v", err)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	server := httptest.NewUnstartedServer(handler)
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+
+	link := "https://" + serverURL.Host + "/echo?host=" + serverURL.Hostname() + "&sni=" + serverURL.Hostname() + "&allowInsecure=true&alpn=h2&mode=stream-up"
+
+	nextDialer := direct.NewDirectDialerLaddr(netip.Addr{}, direct.Option{})
+	xDialer, err := NewDialer(&dialer.ExtraOption{}, nextDialer, link)
+	if err != nil {
+		t.Fatalf("new dialer: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	conn, err := xDialer.DialContext(ctx, "tcp", "example.com:443")
+	if err != nil {
+		cancel()
+		t.Fatalf("dial context: %v", err)
+	}
+	defer conn.Close()
+
+	cancel()
+
+	payload := []byte("hello after dial context cancellation")
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	if xc, ok := conn.(*Conn); ok && xc.uploadBody != nil {
+		if err := xc.uploadBody.Close(); err != nil {
+			t.Fatalf("close upload body: %v", err)
+		}
+	}
+
+	buf := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read payload: %v", err)
+	}
+	if string(buf) != string(payload) {
+		t.Fatalf("unexpected echo: got %q want %q", string(buf), string(payload))
+	}
+}
