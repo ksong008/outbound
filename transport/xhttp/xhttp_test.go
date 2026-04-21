@@ -221,6 +221,10 @@ func TestPreparePacketRequestPlacements(t *testing.T) {
 }
 
 func TestAcquireRequestClientReusesH3Transport(t *testing.T) {
+	globalH3RequestPool.mu.Lock()
+	globalH3RequestPool.entries = make(map[string][]*h3ClientEntry)
+	globalH3RequestPool.mu.Unlock()
+
 	d := &Dialer{}
 	ep := endpoint{
 		addr:       "example.com:443",
@@ -256,6 +260,47 @@ func TestAcquireRequestClientReusesH3Transport(t *testing.T) {
 		t.Fatalf("shared H3 client should stay open after all lease releases")
 	}
 	if err := lease1.client.Close(); err != nil {
+		t.Fatalf("final client close failed: %v", err)
+	}
+}
+
+func TestAcquireRequestClientRotatesH3ClientAfterRequestBudget(t *testing.T) {
+	globalH3RequestPool.mu.Lock()
+	globalH3RequestPool.entries = make(map[string][]*h3ClientEntry)
+	globalH3RequestPool.mu.Unlock()
+
+	d := &Dialer{}
+	ep := endpoint{
+		addr:       "example.com:444",
+		host:       "example.com",
+		path:       "/xhttp",
+		serverName: "example.com",
+		security:   "tls",
+		alpn:       "h3",
+		useH3:      true,
+	}
+	opts := xmuxOptions{enabled: true, hMaxRequestTimes: 1}
+
+	lease1, err := d.acquireRequestClient(context.Background(), ep, "tcp", opts)
+	if err != nil {
+		t.Fatalf("first acquireRequestClient failed: %v", err)
+	}
+	lease1.consumeRequest()
+	if err := lease1.release(); err != nil {
+		t.Fatalf("first release failed: %v", err)
+	}
+
+	lease2, err := d.acquireRequestClient(context.Background(), ep, "tcp", opts)
+	if err != nil {
+		t.Fatalf("second acquireRequestClient failed: %v", err)
+	}
+	if lease1.client == lease2.client {
+		t.Fatalf("expected H3 client rotation after request budget exhaustion")
+	}
+	if err := lease2.release(); err != nil {
+		t.Fatalf("second release failed: %v", err)
+	}
+	if err := lease2.client.Close(); err != nil {
 		t.Fatalf("final client close failed: %v", err)
 	}
 }
@@ -505,6 +550,128 @@ func TestH3AutoStreamUpIntegration(t *testing.T) {
 	}
 	if string(buf) != string(payload) {
 		t.Fatalf("unexpected echo: got %q want %q", string(buf), string(payload))
+	}
+}
+
+func TestH3AutoSupportsSequentialConnections(t *testing.T) {
+	cert := generateSelfSignedCert(t)
+
+	var (
+		mu       sync.Mutex
+		sessions = make(map[string]*h3Session)
+	)
+	sessionKeyFromPath := func(rawPath string) string {
+		trimmed := strings.Trim(rawPath, "/")
+		if trimmed == "" {
+			return ""
+		}
+		parts := strings.Split(trimmed, "/")
+		if len(parts) >= 3 {
+			return parts[len(parts)-2]
+		}
+		return parts[len(parts)-1]
+	}
+	getSession := func(key string) *h3Session {
+		key = sessionKeyFromPath(key)
+		mu.Lock()
+		defer mu.Unlock()
+		if sess, ok := sessions[key]; ok {
+			return sess
+		}
+		pr, pw := io.Pipe()
+		sess := &h3Session{reader: pr, writer: pw}
+		sessions[key] = sess
+		return sess
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sess := getSession(r.URL.Path)
+		switch r.Method {
+		case http.MethodGet:
+			flusher, _ := w.(http.Flusher)
+			w.WriteHeader(http.StatusOK)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			buf := make([]byte, 32*1024)
+			for {
+				n, err := sess.reader.Read(buf)
+				if n > 0 {
+					if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+						return
+					}
+					if flusher != nil {
+						flusher.Flush()
+					}
+				}
+				if err != nil {
+					return
+				}
+			}
+		case http.MethodPost:
+			defer sess.writer.Close()
+			if _, err := io.Copy(sess.writer, r.Body); err != nil {
+				t.Logf("server copy error: %v", err)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	server := &http3.Server{
+		Handler:   handler,
+		TLSConfig: http3.ConfigureTLSConfig(&tls.Config{Certificates: []tls.Certificate{cert}}),
+	}
+	ln, err := quic.ListenAddrEarly("127.0.0.1:0", server.TLSConfig, &quic.Config{})
+	if err != nil {
+		t.Fatalf("listen h3: %v", err)
+	}
+	defer ln.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.ServeListener(ln)
+	}()
+	defer func() {
+		_ = server.Close()
+		select {
+		case <-serverErr:
+		case <-time.After(time.Second):
+		}
+	}()
+
+	nextDialer := direct.NewDirectDialerLaddr(netip.Addr{}, direct.Option{})
+	link := "https://127.0.0.1:" + strconv.Itoa(ln.Addr().(*net.UDPAddr).Port) + "/echo?host=127.0.0.1&sni=127.0.0.1&allowInsecure=true&alpn=h3&mode=auto"
+	xDialer, err := NewDialer(&dialer.ExtraOption{}, nextDialer, link)
+	if err != nil {
+		t.Fatalf("new dialer: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conn, err := xDialer.DialContext(ctx, "tcp", "example.com:443")
+		cancel()
+		if err != nil {
+			t.Fatalf("dial context %d: %v", i, err)
+		}
+
+		payload := []byte("hello over h3 auto seq " + strconv.Itoa(i))
+		if _, err := conn.Write(payload); err != nil {
+			conn.Close()
+			t.Fatalf("write payload %d: %v", i, err)
+		}
+		buf := make([]byte, len(payload))
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			conn.Close()
+			t.Fatalf("read payload %d: %v", i, err)
+		}
+		if string(buf) != string(payload) {
+			conn.Close()
+			t.Fatalf("unexpected echo %d: got %q want %q", i, string(buf), string(payload))
+		}
+		_ = conn.Close()
 	}
 }
 

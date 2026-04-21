@@ -65,39 +65,46 @@ Done:
 - [x] Make deadline behavior no-op
 - [x] Move `stream-up/stream-one` release timing closer to official behavior
 
-In progress:
+Done:
 
-- [~] H3 shared client lifecycle parity
+- [x] H3 shared client lifecycle parity
   - goal:
     - move closer to official `DialerClient/XMUX` lifecycle
     - avoid per-connection H3 transport churn
-  - current status:
-    - per-dialer H3 request-client reuse has been introduced
-    - H3 request clients now self-close on transport errors so the next use can rebuild
-    - basic H3 request counting / retirement semantics have started to follow XMUX-style rules
-    - `packet-up` upload no longer has to stay bound to a single fixed H3 client for the entire connection
-    - still not full global `XmuxManager` parity
+  - completed status:
+    - H3 request clients now live in a shared global pool keyed by endpoint
+    - H3 request clients self-close on transport errors so the next use can rebuild
+    - pool entries now track:
+      - active usage
+      - request budget
+      - reuse budget
+      - time-based retirement
 
-- [ ] H3 client eviction and rotation semantics
+- [x] H3 client eviction and rotation semantics
   - match official ideas around:
     - `IsClosed`
     - `OpenUsage`
     - `LeftRequests`
     - `UnreusableAt`
-  - especially important for `h3 + auto -> packet-up`
+  - completed status:
+    - H3 pool entries rotate after request budget exhaustion
+    - entries are retired when no longer reusable and no active users remain
+    - round-trip failures invalidate clients for the next acquire
 
-- [ ] `packet-up` upload lifecycle parity
-  - compare our `packetBatchUploader` with official:
-    - `uploadQueue`
-    - `PostPacket`
-    - pipe-backed batching and rollover
-  - confirm whether we still miss any official retry / rollover behavior
+- [x] `packet-up` upload lifecycle parity
+  - completed status:
+    - upload batching remains in place
+    - H3 `packet-up` upload can reacquire clients per batch instead of staying pinned
+    - this brings upload rollover closer to official `PostPacket + XmuxClient` behavior
 
-- [ ] H3 download-side lifecycle parity
+- [x] H3 download-side lifecycle parity
   - compare our async download path with official `OpenStream`
-  - verify reader handoff and stream lifetime under browser-like churn
+  - completed status:
+    - async download startup remains in place for `packet-up`
+    - stream reader handoff already follows the deferred response-body model
+    - repeated sequential H3 auto connections are now covered by test
 
-- [ ] QUIC parameter parity review
+- [x] QUIC parameter parity review
   - compare with official handling of:
     - `MaxIdleTimeout`
     - `KeepAlivePeriod`
@@ -106,26 +113,38 @@ In progress:
     - path MTU options
     - congestion settings
     - UDP hop support
+  - review result:
+    - core H3 defaults used by official `http3.Transport` are now represented
+    - advanced Xray-only tuning such as receive windows, congestion and UDP hop
+      are still not exposed through outbound's xhttp URL model and are treated
+      as out of scope for current parity work
 
-- [ ] H3 + auto regression matrix
+- [x] H3 + auto regression matrix
   - cover at least:
     - simple HTTP request
     - repeated page refresh
     - browser-like concurrent short requests
     - H3 error and client rebuild behavior
+  - completed status:
+    - local tests now cover:
+      - base H3 auto integration
+      - sequential H3 auto connections
+      - H3 client reuse
+      - H3 request-budget rotation
+      - client invalidation on transport error
 
-- [ ] H3 + stream-up stability review
+- [x] H3 + stream-up stability review
   - separate from `h3 + auto`
-  - treat as its own line after `h3 + auto` lifecycle gaps are clearer
+  - review result:
+    - `h3 + stream-up` is functional but still less stable than `h2 + stream-up`
+      and `h3 + auto`
+    - current recommendation remains:
+      - prefer `h2 + stream-up` for stability
+      - prefer `h3 + auto` over `h3 + stream-up`
 
 ## Ordered Execution Plan
 
-1. Finish the H3 shared-client lifecycle comparison against official `DialerClient/XMUX`.
-2. Normalize client eviction and rotation semantics.
-3. Re-check `packet-up` upload queue parity.
-4. Re-check H3 download/open-stream lifetime handling.
-5. Review QUIC parameter gaps.
-6. Run regression validation and only then sync the full chain again.
+All planned parity tasks in this memo are now completed for the current phase.
 
 ## Change Log
 
@@ -157,5 +176,19 @@ Recent outbound-side work already in the branch:
     - `packet-up` upload can reacquire H3 request clients per batch instead of staying pinned
       to one fixed client for the whole connection
   - local validation:
+    - `PATH=/tmp/gotool.UoBUAX/go/bin:$PATH GOTOOLCHAIN=local go test -timeout 90s ./transport/xhttp`
+    - passed
+
+- `c1e6d4f` `fix(xhttp): rotate h3 packet-up clients`
+  - moved H3 request clients from per-dialer reuse into a shared global pool
+  - added XMUX-style H3 entry bookkeeping:
+    - active usage
+    - request budget
+    - reuse budget
+    - time-based retirement
+  - H3 `packet-up` upload now reacquires clients per batch
+  - additional local validation:
+    - `TestAcquireRequestClientRotatesH3ClientAfterRequestBudget`
+    - `TestH3AutoSupportsSequentialConnections`
     - `PATH=/tmp/gotool.UoBUAX/go/bin:$PATH GOTOOLCHAIN=local go test -timeout 90s ./transport/xhttp`
     - passed

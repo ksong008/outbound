@@ -53,8 +53,6 @@ type Dialer struct {
 	uplinkDataPlacement string
 	uplinkDataKey       string
 	uplinkChunkSize     rangedInt
-	h3ClientMu       sync.Mutex
-	h3Clients        map[string][]*h3ClientEntry
 }
 
 type extraConfig struct {
@@ -869,6 +867,15 @@ type h3ClientEntry struct {
 	unreusableAt  time.Time
 }
 
+type h3ClientPool struct {
+	mu      sync.Mutex
+	entries map[string][]*h3ClientEntry
+}
+
+var globalH3RequestPool = &h3ClientPool{
+	entries: make(map[string][]*h3ClientEntry),
+}
+
 func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network string) (*requestClient, error) {
 	if !ep.useH3 {
 		rawConn, h2Conn, err := d.openH2Conn(ctx, ep)
@@ -981,10 +988,10 @@ func (e *h3ClientEntry) reusable(now time.Time) bool {
 	return true
 }
 
-func (d *Dialer) releaseH3Client(key string, entry *h3ClientEntry) error {
-	d.h3ClientMu.Lock()
-	defer d.h3ClientMu.Unlock()
-	entries := d.h3Clients[key]
+func (p *h3ClientPool) release(key string, entry *h3ClientEntry) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	entries := p.entries[key]
 	for i, candidate := range entries {
 		if candidate != entry {
 			continue
@@ -994,9 +1001,9 @@ func (d *Dialer) releaseH3Client(key string, entry *h3ClientEntry) error {
 		}
 		if candidate.active == 0 && !candidate.reusable(time.Now()) {
 			_ = candidate.client.Close()
-			d.h3Clients[key] = append(entries[:i], entries[i+1:]...)
-			if len(d.h3Clients[key]) == 0 {
-				delete(d.h3Clients, key)
+			p.entries[key] = append(entries[:i], entries[i+1:]...)
+			if len(p.entries[key]) == 0 {
+				delete(p.entries, key)
 			}
 		}
 		return nil
@@ -1018,13 +1025,10 @@ func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network 
 	}
 
 	key := requestClientPoolKey(ep, network)
-	d.h3ClientMu.Lock()
-	defer d.h3ClientMu.Unlock()
-	if d.h3Clients == nil {
-		d.h3Clients = make(map[string][]*h3ClientEntry)
-	}
+	globalH3RequestPool.mu.Lock()
+	defer globalH3RequestPool.mu.Unlock()
 	now := time.Now()
-	entries := d.h3Clients[key]
+	entries := globalH3RequestPool.entries[key]
 	filtered := entries[:0]
 	eligible := make([]*h3ClientEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -1045,7 +1049,7 @@ func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network 
 		}
 		eligible = append(eligible, entry)
 	}
-	d.h3Clients[key] = filtered
+	globalH3RequestPool.entries[key] = filtered
 
 	shouldCreate := len(filtered) == 0
 	if !shouldCreate && opts.maxConnections > 0 && len(filtered) < opts.maxConnections {
@@ -1064,13 +1068,13 @@ func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network 
 		if entry.leftUsage > 0 {
 			entry.leftUsage--
 		}
-		d.h3Clients[key] = append(d.h3Clients[key], entry)
+		globalH3RequestPool.entries[key] = append(globalH3RequestPool.entries[key], entry)
 		return &requestClientLease{
 			client:  client,
-			release: func() error { return d.releaseH3Client(key, entry) },
+			release: func() error { return globalH3RequestPool.release(key, entry) },
 			consumeRequest: func() {
-				d.h3ClientMu.Lock()
-				defer d.h3ClientMu.Unlock()
+				globalH3RequestPool.mu.Lock()
+				defer globalH3RequestPool.mu.Unlock()
 				if entry.leftRequests > 0 && entry.leftRequests != math.MaxInt32 {
 					entry.leftRequests--
 				}
@@ -1084,10 +1088,10 @@ func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network 
 	}
 	return &requestClientLease{
 		client:  entry.client,
-		release: func() error { return d.releaseH3Client(key, entry) },
+		release: func() error { return globalH3RequestPool.release(key, entry) },
 		consumeRequest: func() {
-			d.h3ClientMu.Lock()
-			defer d.h3ClientMu.Unlock()
+			globalH3RequestPool.mu.Lock()
+			defer globalH3RequestPool.mu.Unlock()
 			if entry.leftRequests > 0 && entry.leftRequests != math.MaxInt32 {
 				entry.leftRequests--
 			}
