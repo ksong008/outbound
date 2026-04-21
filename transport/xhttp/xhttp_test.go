@@ -21,6 +21,7 @@ import (
 	"time"
 	"net/http/httptest"
 	"net/url"
+	"errors"
 
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/protocol/direct"
@@ -217,6 +218,73 @@ func TestPreparePacketRequestPlacements(t *testing.T) {
 			t.Fatalf("expected cookies to be set")
 		}
 	})
+}
+
+func TestAcquireRequestClientReusesH3Transport(t *testing.T) {
+	d := &Dialer{}
+	ep := endpoint{
+		addr:       "example.com:443",
+		host:       "example.com",
+		path:       "/xhttp",
+		serverName: "example.com",
+		security:   "tls",
+		alpn:       "h3",
+		useH3:      true,
+	}
+
+	lease1, err := d.acquireRequestClient(context.Background(), ep, "tcp")
+	if err != nil {
+		t.Fatalf("first acquireRequestClient failed: %v", err)
+	}
+	lease2, err := d.acquireRequestClient(context.Background(), ep, "tcp")
+	if err != nil {
+		t.Fatalf("second acquireRequestClient failed: %v", err)
+	}
+	if lease1.client != lease2.client {
+		t.Fatalf("expected H3 request client reuse, got distinct clients")
+	}
+	if err := lease1.release(); err != nil {
+		t.Fatalf("first release failed: %v", err)
+	}
+	if lease1.client.IsClosed() {
+		t.Fatalf("shared H3 client should stay open after lease release")
+	}
+	if err := lease2.release(); err != nil {
+		t.Fatalf("second release failed: %v", err)
+	}
+	if lease1.client.IsClosed() {
+		t.Fatalf("shared H3 client should stay open after all lease releases")
+	}
+	if err := lease1.client.Close(); err != nil {
+		t.Fatalf("final client close failed: %v", err)
+	}
+}
+
+type errorRoundTripper struct{}
+
+func (errorRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("boom")
+}
+
+func TestRequestClientClosesOnRoundTripError(t *testing.T) {
+	closed := false
+	client := &requestClient{
+		rt: errorRoundTripper{},
+		closeFn: func() error {
+			closed = true
+			return nil
+		},
+	}
+	req, _ := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if _, err := client.RoundTrip(req); err == nil {
+		t.Fatalf("expected round trip error")
+	}
+	if !closed {
+		t.Fatalf("expected client to close itself on round trip error")
+	}
+	if !client.IsClosed() {
+		t.Fatalf("expected client closed flag after round trip error")
+	}
 }
 
 func generateSelfSignedCert(t *testing.T) tls.Certificate {

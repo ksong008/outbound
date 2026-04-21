@@ -52,6 +52,8 @@ type Dialer struct {
 	uplinkDataPlacement string
 	uplinkDataKey       string
 	uplinkChunkSize     rangedInt
+	h3ClientMu       sync.Mutex
+	h3Clients        map[string]*requestClient
 }
 
 type extraConfig struct {
@@ -817,9 +819,26 @@ type requestClient struct {
 	rawConn netproxy.Conn
 	rt      requestRoundTripper
 	closeFn func() error
+	closed  bool
+	mu      sync.Mutex
+}
+
+func (c *requestClient) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := c.rt.RoundTrip(req)
+	if err != nil {
+		_ = c.Close()
+	}
+	return resp, err
 }
 
 func (c *requestClient) Close() error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	c.mu.Unlock()
 	if c.closeFn != nil {
 		return c.closeFn()
 	}
@@ -827,6 +846,17 @@ func (c *requestClient) Close() error {
 		return c.rawConn.Close()
 	}
 	return nil
+}
+
+func (c *requestClient) IsClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+type requestClientLease struct {
+	client  *requestClient
+	release func() error
 }
 
 func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network string) (*requestClient, error) {
@@ -853,8 +883,9 @@ func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network str
 		NextProtos:         []string{"h3"},
 	}
 	quicCfg := &quic.Config{
-		EnableDatagrams:   true,
-		KeepAlivePeriod:   10 * time.Second,
+		EnableDatagrams:    true,
+		MaxIdleTimeout:     300 * time.Second,
+		KeepAlivePeriod:    10 * time.Second,
 		MaxIncomingStreams: -1,
 	}
 	rt := &http3.Transport{
@@ -891,6 +922,53 @@ func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network str
 			}
 			return err
 		},
+	}, nil
+}
+
+func requestClientPoolKey(ep endpoint, network string) string {
+	return strings.Join([]string{
+		ep.addr,
+		ep.host,
+		ep.path,
+		ep.serverName,
+		ep.security,
+		ep.alpn,
+		network,
+	}, "|")
+}
+
+func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network string) (*requestClientLease, error) {
+	if !ep.useH3 {
+		client, err := d.openRequestClient(ctx, ep, network)
+		if err != nil {
+			return nil, err
+		}
+		return &requestClientLease{
+			client:  client,
+			release: client.Close,
+		}, nil
+	}
+
+	key := requestClientPoolKey(ep, network)
+	d.h3ClientMu.Lock()
+	defer d.h3ClientMu.Unlock()
+	if d.h3Clients == nil {
+		d.h3Clients = make(map[string]*requestClient)
+	}
+	if client := d.h3Clients[key]; client != nil && !client.IsClosed() {
+		return &requestClientLease{
+			client:  client,
+			release: func() error { return nil },
+		}, nil
+	}
+	client, err := d.openRequestClient(ctx, ep, network)
+	if err != nil {
+		return nil, err
+	}
+	d.h3Clients[key] = client
+	return &requestClientLease{
+		client:  client,
+		release: func() error { return nil },
 	}, nil
 }
 
@@ -1091,10 +1169,11 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 	if magicNetwork.Network != "tcp" {
 		return nil, fmt.Errorf("%w: xhttp+%s", netproxy.UnsupportedTunnelTypeError, magicNetwork.Network)
 	}
-	uploadClient, err := d.openRequestClient(ctx, d.uploadEndpoint, network)
+	uploadLease, err := d.acquireRequestClient(ctx, d.uploadEndpoint, network)
 	if err != nil {
 		return nil, err
 	}
+	uploadClient := uploadLease.client
 	downloadEndpoint := d.uploadEndpoint
 	if d.downloadEndpoint != nil {
 		downloadEndpoint = *d.downloadEndpoint
@@ -1116,37 +1195,39 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 	switch d.mode {
 	case "stream-up":
 		downloadClient := uploadClient
+		downloadLease := uploadLease
 		if d.downloadEndpoint != nil {
-			downloadClient, err = d.openRequestClient(ctx, downloadEndpoint, network)
+			downloadLease, err = d.acquireRequestClient(ctx, downloadEndpoint, network)
 			if err != nil {
-				_ = uploadClient.Close()
+				_ = uploadLease.release()
 				return nil, err
 			}
+			downloadClient = downloadLease.client
 		}
 
 		downloadReq, err := http.NewRequestWithContext(requestCtx, http.MethodGet, downloadTargetURL, nil)
 		if err != nil {
-			_ = uploadClient.Close()
+			_ = uploadLease.release()
 			if downloadClient != uploadClient {
-				_ = downloadClient.Close()
+				_ = downloadLease.release()
 			}
 			return nil, err
 		}
 		downloadReq.Host = downloadEndpoint.host
 		d.prepareStreamRequest(downloadReq, sessionID)
-		downloadResp, err := downloadClient.rt.RoundTrip(downloadReq)
+		downloadResp, err := downloadClient.RoundTrip(downloadReq)
 		if err != nil {
-			_ = uploadClient.Close()
+			_ = uploadLease.release()
 			if downloadClient != uploadClient {
-				_ = downloadClient.Close()
+				_ = downloadLease.release()
 			}
 			return nil, err
 		}
 		if downloadResp.StatusCode != http.StatusOK {
 			downloadResp.Body.Close()
-			_ = uploadClient.Close()
+			_ = uploadLease.release()
 			if downloadClient != uploadClient {
-				_ = downloadClient.Close()
+				_ = downloadLease.release()
 			}
 			return nil, fmt.Errorf("xhttp: download path returned %s", downloadResp.Status)
 		}
@@ -1155,9 +1236,9 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		uploadReq, err := http.NewRequestWithContext(requestCtx, d.normalizedUplinkHTTPMethod(), uploadTargetURL, pr)
 		if err != nil {
 			downloadResp.Body.Close()
-			_ = uploadClient.Close()
+			_ = uploadLease.release()
 			if downloadClient != uploadClient {
-				_ = downloadClient.Close()
+				_ = downloadLease.release()
 			}
 			return nil, err
 		}
@@ -1167,26 +1248,26 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		conn := &Conn{
 			uploadConn:   uploadClient.rawConn,
 			downloadConn: downloadClient.rawConn,
-			uploadRelease: uploadClient.Close,
-			downloadRelease: downloadClient.Close,
+			uploadRelease: uploadLease.release,
+			downloadRelease: downloadLease.release,
 			sharedRelease: uploadClient == downloadClient,
 			uploadBody:   pw,
 			releaseWithBodies: true,
 		}
 		if uploadClient == downloadClient {
-			releaseGroup := newSharedReleaseGroup(2, uploadClient.Close)
+			releaseGroup := newSharedReleaseGroup(2, uploadLease.release)
 			conn.downloadBody = wrapManagedReadCloser(downloadResp.Body, releaseGroup.Done)
-			go conn.finishUpload(uploadClient.rt, uploadReq, releaseGroup.Done)
+			go conn.finishUpload(uploadClient, uploadReq, releaseGroup.Done)
 		} else {
-			conn.downloadBody = wrapManagedReadCloser(downloadResp.Body, func() { _ = downloadClient.Close() })
-			go conn.finishUpload(uploadClient.rt, uploadReq, func() { _ = uploadClient.Close() })
+			conn.downloadBody = wrapManagedReadCloser(downloadResp.Body, func() { _ = downloadLease.release() })
+			go conn.finishUpload(uploadClient, uploadReq, func() { _ = uploadLease.release() })
 		}
 		return conn, nil
 	case "stream-one":
 		pr, pw := io.Pipe()
 		uploadReq, err := http.NewRequestWithContext(requestCtx, d.normalizedUplinkHTTPMethod(), uploadTargetURL, pr)
 		if err != nil {
-			_ = uploadClient.Close()
+			_ = uploadLease.release()
 			return nil, err
 		}
 		uploadReq.Host = d.uploadEndpoint.host
@@ -1195,30 +1276,32 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		conn := &Conn{
 			uploadConn:   uploadClient.rawConn,
 			downloadConn: uploadClient.rawConn,
-			uploadRelease: uploadClient.Close,
-			downloadRelease: uploadClient.Close,
+			uploadRelease: uploadLease.release,
+			downloadRelease: uploadLease.release,
 			sharedRelease: true,
 			releaseWithBodies: true,
 			uploadBody:   pw,
 			respCh:       make(chan responseResult, 1),
 		}
-		go conn.startStreamOne(uploadClient.rt, uploadReq, func() { _ = uploadClient.Close() })
+		go conn.startStreamOne(uploadClient, uploadReq, func() { _ = uploadLease.release() })
 		return conn, nil
 	case "packet-up":
 		downloadClient := uploadClient
+		downloadLease := uploadLease
 		if d.downloadEndpoint != nil {
-			downloadClient, err = d.openRequestClient(ctx, downloadEndpoint, network)
+			downloadLease, err = d.acquireRequestClient(ctx, downloadEndpoint, network)
 			if err != nil {
-				_ = uploadClient.Close()
+				_ = uploadLease.release()
 				return nil, err
 			}
+			downloadClient = downloadLease.client
 		}
 
 		downloadReq, err := http.NewRequestWithContext(requestCtx, http.MethodGet, downloadTargetURL, nil)
 		if err != nil {
-			_ = uploadClient.Close()
+			_ = uploadLease.release()
 			if downloadClient != uploadClient {
-				_ = downloadClient.Close()
+				_ = downloadLease.release()
 			}
 			return nil, err
 		}
@@ -1228,18 +1311,18 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		conn := &Conn{
 			uploadConn:   uploadClient.rawConn,
 			downloadConn: downloadClient.rawConn,
-			uploadRelease: uploadClient.Close,
-			downloadRelease: downloadClient.Close,
+			uploadRelease: uploadLease.release,
+			downloadRelease: downloadLease.release,
 			sharedRelease: uploadClient == downloadClient,
 			releaseWithBodies: true,
 			respCh:        make(chan responseResult, 1),
 		}
 		packetFlushDelay := 15 * time.Millisecond
 		if uploadClient == downloadClient {
-			releaseGroup := newSharedReleaseGroup(2, uploadClient.Close)
+			releaseGroup := newSharedReleaseGroup(2, uploadLease.release)
 			uploader := newPacketBatchUploader(
 				requestCtx,
-				uploadClient.rt,
+				uploadClient,
 				uploadTargetURL,
 				d.uploadEndpoint.host,
 				d,
@@ -1254,11 +1337,11 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 				releaseGroup.Done()
 				return err
 			}
-			go conn.startDownload(downloadClient.rt, downloadReq, releaseGroup.Done)
+			go conn.startDownload(downloadClient, downloadReq, releaseGroup.Done)
 		} else {
 			uploader := newPacketBatchUploader(
 				requestCtx,
-				uploadClient.rt,
+				uploadClient,
 				uploadTargetURL,
 				d.uploadEndpoint.host,
 				d,
@@ -1270,13 +1353,13 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			conn.packetUpload = uploader.enqueue
 			conn.packetClose = func() error {
 				err := uploader.close()
-				_ = uploadClient.Close()
+				_ = uploadLease.release()
 				return err
 			}
-			go conn.startDownload(downloadClient.rt, downloadReq, func() { _ = downloadClient.Close() })
+			go conn.startDownload(downloadClient, downloadReq, func() { _ = downloadLease.release() })
 		}
 		if d.xmux.enabled && !d.uploadEndpoint.useH3 {
-			_ = uploadClient.Close()
+			_ = uploadLease.release()
 			lease, err := globalPacketUploadPool.acquire(ctx, d.uploadEndpoint, d.xmux, d.openH2Conn)
 			if err != nil {
 				conn.Close()
@@ -1307,7 +1390,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		}
 		return conn, nil
 	default:
-		_ = uploadClient.Close()
+		_ = uploadLease.release()
 		return nil, fmt.Errorf("xhttp: mode %q is not supported yet", d.mode)
 	}
 }
