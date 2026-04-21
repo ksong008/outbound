@@ -245,16 +245,17 @@ func normalizeMode(mode, scheme, security string, hasDownloadSettings bool) (str
 	mode = strings.TrimSpace(strings.ToLower(mode))
 	switch mode {
 	case "", "auto":
+		if scheme != "https" {
+			return "", fmt.Errorf("xhttp: auto mode without tls is not supported yet")
+		}
+		autoMode := "packet-up"
 		if strings.EqualFold(security, "reality") {
 			if hasDownloadSettings {
 				return "stream-up", nil
 			}
 			return "stream-one", nil
 		}
-		if scheme == "https" {
-			return "stream-up", nil
-		}
-		return "", fmt.Errorf("xhttp: auto mode without tls is not supported yet")
+		return autoMode, nil
 	case "stream-up":
 		return mode, nil
 	case "stream-one":
@@ -852,7 +853,9 @@ func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network str
 		NextProtos:         []string{"h3"},
 	}
 	quicCfg := &quic.Config{
-		EnableDatagrams: true,
+		EnableDatagrams:   true,
+		KeepAlivePeriod:   10 * time.Second,
+		MaxIncomingStreams: -1,
 	}
 	rt := &http3.Transport{
 		TLSClientConfig: tlsCfg,

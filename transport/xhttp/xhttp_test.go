@@ -41,8 +41,8 @@ func TestNormalizeMode(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{name: "auto over https", mode: "auto", scheme: "https", want: "stream-up"},
-		{name: "empty over https", mode: "", scheme: "https", want: "stream-up"},
+		{name: "auto over https", mode: "auto", scheme: "https", want: "packet-up"},
+		{name: "empty over https", mode: "", scheme: "https", want: "packet-up"},
 		{name: "stream-up", mode: "stream-up", scheme: "https", want: "stream-up"},
 		{name: "stream-one over https", mode: "stream-one", scheme: "https", want: "stream-one"},
 		{name: "packet-up over https", mode: "packet-up", scheme: "https", want: "packet-up"},
@@ -330,8 +330,19 @@ func TestH3AutoStreamUpIntegration(t *testing.T) {
 		mu       sync.Mutex
 		sessions = make(map[string]*h3Session)
 	)
+	sessionKeyFromPath := func(rawPath string) string {
+		trimmed := strings.Trim(rawPath, "/")
+		if trimmed == "" {
+			return ""
+		}
+		parts := strings.Split(trimmed, "/")
+		if len(parts) >= 3 {
+			return parts[len(parts)-2]
+		}
+		return parts[len(parts)-1]
+	}
 	getSession := func(key string) *h3Session {
-		key = path.Base(key)
+		key = sessionKeyFromPath(key)
 		mu.Lock()
 		defer mu.Unlock()
 		if sess, ok := sessions[key]; ok {
@@ -416,7 +427,7 @@ func TestH3AutoStreamUpIntegration(t *testing.T) {
 	}
 	defer conn.Close()
 
-	payload := []byte("hello over h3 xhttp stream-up")
+	payload := []byte("hello over h3 xhttp packet-up")
 	if _, err := conn.Write(payload); err != nil {
 		t.Fatalf("write payload: %v", err)
 	}
@@ -517,7 +528,7 @@ func TestDownloadSettingsSplitStreamUpIntegration(t *testing.T) {
 	}
 
 	extraJSON := `{"downloadSettings":{"address":"` + downloadURL.Hostname() + `","port":` + downloadURL.Port() + `,"network":"xhttp","security":"tls","tlsSettings":{"serverName":"` + downloadURL.Hostname() + `","allowInsecure":true,"alpn":["h2"]},"xhttpSettings":{"host":"` + downloadURL.Hostname() + `","path":"/download"}}}`
-	link := "https://" + uploadURL.Host + "/upload?host=" + uploadURL.Hostname() + "&sni=" + uploadURL.Hostname() + "&allowInsecure=true&alpn=h2&mode=auto&extra=" + url.QueryEscape(extraJSON)
+	link := "https://" + uploadURL.Host + "/upload?host=" + uploadURL.Hostname() + "&sni=" + uploadURL.Hostname() + "&allowInsecure=true&alpn=h2&mode=stream-up&extra=" + url.QueryEscape(extraJSON)
 
 	nextDialer := direct.NewDirectDialerLaddr(netip.Addr{}, direct.Option{})
 	xDialer, err := NewDialer(&dialer.ExtraOption{}, nextDialer, link)
