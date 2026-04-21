@@ -1224,22 +1224,6 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		}
 		downloadReq.Host = downloadEndpoint.host
 		d.prepareStreamRequest(downloadReq, sessionID)
-		downloadResp, err := downloadClient.rt.RoundTrip(downloadReq)
-		if err != nil {
-			_ = uploadClient.Close()
-			if downloadClient != uploadClient {
-				_ = downloadClient.Close()
-			}
-			return nil, err
-		}
-		if downloadResp.StatusCode != http.StatusOK {
-			downloadResp.Body.Close()
-			_ = uploadClient.Close()
-			if downloadClient != uploadClient {
-				_ = downloadClient.Close()
-			}
-			return nil, fmt.Errorf("xhttp: download path returned %s", downloadResp.Status)
-		}
 
 		conn := &Conn{
 			uploadConn:   uploadClient.rawConn,
@@ -1247,8 +1231,49 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			uploadRelease: uploadClient.Close,
 			downloadRelease: downloadClient.Close,
 			sharedRelease: uploadClient == downloadClient,
-			downloadBody:  downloadResp.Body,
-			packetUpload:  d.buildPacketUploader(requestCtx, uploadClient.rt, uploadTargetURL, sessionID),
+			releaseWithBodies: true,
+			respCh:        make(chan responseResult, 1),
+		}
+		packetFlushDelay := 15 * time.Millisecond
+		if uploadClient == downloadClient {
+			releaseGroup := newSharedReleaseGroup(2, uploadClient.Close)
+			uploader := newPacketBatchUploader(
+				requestCtx,
+				uploadClient.rt,
+				uploadTargetURL,
+				d.uploadEndpoint.host,
+				d,
+				sessionID,
+				d.packetMaxBytes,
+				d.packetMinGap,
+				packetFlushDelay,
+			)
+			conn.packetUpload = uploader.enqueue
+			conn.packetClose = func() error {
+				err := uploader.close()
+				releaseGroup.Done()
+				return err
+			}
+			go conn.startDownload(downloadClient.rt, downloadReq, releaseGroup.Done)
+		} else {
+			uploader := newPacketBatchUploader(
+				requestCtx,
+				uploadClient.rt,
+				uploadTargetURL,
+				d.uploadEndpoint.host,
+				d,
+				sessionID,
+				d.packetMaxBytes,
+				d.packetMinGap,
+				packetFlushDelay,
+			)
+			conn.packetUpload = uploader.enqueue
+			conn.packetClose = func() error {
+				err := uploader.close()
+				_ = uploadClient.Close()
+				return err
+			}
+			go conn.startDownload(downloadClient.rt, downloadReq, func() { _ = downloadClient.Close() })
 		}
 		if d.xmux.enabled && !d.uploadEndpoint.useH3 {
 			_ = uploadClient.Close()
@@ -1259,7 +1284,26 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			}
 			conn.uploadConn = nil
 			conn.uploadRelease = lease.release
-			conn.packetUpload = d.buildPacketUploader(requestCtx, lease.h2Conn, uploadTargetURL, sessionID)
+			xmuxUploader := newPacketBatchUploader(
+				requestCtx,
+				lease.h2Conn,
+				uploadTargetURL,
+				d.uploadEndpoint.host,
+				d,
+				sessionID,
+				d.packetMaxBytes,
+				d.packetMinGap,
+				packetFlushDelay,
+			)
+			conn.packetUpload = xmuxUploader.enqueue
+			conn.packetClose = func() error {
+				closeErr := xmuxUploader.close()
+				releaseErr := lease.release()
+				if closeErr != nil {
+					return closeErr
+				}
+				return releaseErr
+			}
 		}
 		return conn, nil
 	default:
@@ -1323,6 +1367,7 @@ type Conn struct {
 	uploadBody   *io.PipeWriter
 	downloadBody io.ReadCloser
 	packetUpload func([]byte) error
+	packetClose  func() error
 
 	closeOnce sync.Once
 	uploadErr error
@@ -1386,6 +1431,149 @@ func wrapManagedReadCloser(rc io.ReadCloser, onClose func()) io.ReadCloser {
 	}
 }
 
+type packetBatchUploader struct {
+	mu            sync.Mutex
+	cond          *sync.Cond
+	buf           bytes.Buffer
+	closed        bool
+	err           error
+	wg            sync.WaitGroup
+	flushDelay    time.Duration
+	maxUploadSize int
+	minGap        time.Duration
+	seq           uint64
+	reqCtx        context.Context
+	uploadRT      requestRoundTripper
+	uploadTargetURL string
+	host          string
+	dialer        *Dialer
+	sessionID     string
+}
+
+func newPacketBatchUploader(
+	reqCtx context.Context,
+	uploadRT requestRoundTripper,
+	uploadTargetURL string,
+	host string,
+	dialer *Dialer,
+	sessionID string,
+	maxUploadSize int,
+	minGap time.Duration,
+	flushDelay time.Duration,
+) *packetBatchUploader {
+	u := &packetBatchUploader{
+		flushDelay:      flushDelay,
+		maxUploadSize:   maxUploadSize,
+		minGap:          minGap,
+		reqCtx:          reqCtx,
+		uploadRT:        uploadRT,
+		uploadTargetURL: uploadTargetURL,
+		host:            host,
+		dialer:          dialer,
+		sessionID:       sessionID,
+	}
+	u.cond = sync.NewCond(&u.mu)
+	u.wg.Add(1)
+	go u.run()
+	return u
+}
+
+func (u *packetBatchUploader) enqueue(p []byte) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.err != nil {
+		return u.err
+	}
+	if u.closed {
+		return io.ErrClosedPipe
+	}
+	_, _ = u.buf.Write(p)
+	u.cond.Signal()
+	return nil
+}
+
+func (u *packetBatchUploader) close() error {
+	u.mu.Lock()
+	u.closed = true
+	u.cond.Broadcast()
+	u.mu.Unlock()
+	u.wg.Wait()
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.err
+}
+
+func (u *packetBatchUploader) run() {
+	defer u.wg.Done()
+	for {
+		u.mu.Lock()
+		for u.buf.Len() == 0 && !u.closed && u.err == nil {
+			u.cond.Wait()
+		}
+		if u.err != nil || (u.closed && u.buf.Len() == 0) {
+			u.mu.Unlock()
+			return
+		}
+		u.mu.Unlock()
+
+		if u.flushDelay > 0 {
+			time.Sleep(u.flushDelay)
+		}
+
+		u.mu.Lock()
+		if u.buf.Len() == 0 {
+			u.mu.Unlock()
+			continue
+		}
+		size := u.buf.Len()
+		if u.maxUploadSize > 0 && size > u.maxUploadSize {
+			size = u.maxUploadSize
+		}
+		chunk := make([]byte, size)
+		_, _ = io.ReadFull(&u.buf, chunk)
+		seqStr := strconv.FormatUint(u.seq, 10)
+		u.seq++
+		u.mu.Unlock()
+
+		req, err := http.NewRequestWithContext(u.reqCtx, u.dialer.normalizedUplinkHTTPMethod(), u.uploadTargetURL, nil)
+		if err != nil {
+			u.setErr(err)
+			return
+		}
+		req.Host = u.host
+		if err := u.dialer.preparePacketRequest(req, u.sessionID, seqStr, chunk); err != nil {
+			u.setErr(err)
+			return
+		}
+		resp, err := u.uploadRT.RoundTrip(req)
+		if err != nil {
+			u.setErr(err)
+			return
+		}
+		func() {
+			defer resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
+		}()
+		if resp.StatusCode != http.StatusOK {
+			u.setErr(fmt.Errorf("xhttp: packet-up path returned %s", resp.Status))
+			return
+		}
+		if u.minGap > 0 {
+			time.Sleep(u.minGap)
+		}
+	}
+}
+
+func (u *packetBatchUploader) setErr(err error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.err == nil {
+		u.err = err
+	}
+	u.closed = true
+	u.cond.Broadcast()
+}
+
 func (c *Conn) finishUpload(rt requestRoundTripper, req *http.Request, onDone func()) {
 	if onDone != nil {
 		defer onDone()
@@ -1417,6 +1605,26 @@ func (c *Conn) startStreamOne(rt requestRoundTripper, req *http.Request, onDone 
 			onDone()
 		}
 		c.respCh <- responseResult{err: fmt.Errorf("xhttp: stream-one path returned %s", resp.Status)}
+		return
+	}
+	c.respCh <- responseResult{body: wrapManagedReadCloser(resp.Body, onDone)}
+}
+
+func (c *Conn) startDownload(rt requestRoundTripper, req *http.Request, onDone func()) {
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		if onDone != nil {
+			onDone()
+		}
+		c.respCh <- responseResult{err: err}
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		if onDone != nil {
+			onDone()
+		}
+		c.respCh <- responseResult{err: fmt.Errorf("xhttp: download path returned %s", resp.Status)}
 		return
 	}
 	c.respCh <- responseResult{body: wrapManagedReadCloser(resp.Body, onDone)}
@@ -1460,6 +1668,9 @@ func (c *Conn) Write(p []byte) (n int, err error) {
 }
 
 func (c *Conn) CloseWrite() error {
+	if c.packetClose != nil {
+		return c.packetClose()
+	}
 	if c.uploadBody == nil {
 		return nil
 	}
@@ -1469,6 +1680,9 @@ func (c *Conn) CloseWrite() error {
 func (c *Conn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
+		if c.packetClose != nil {
+			err = c.packetClose()
+		}
 		if c.uploadBody != nil {
 			_ = c.uploadBody.Close()
 		}
