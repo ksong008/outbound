@@ -42,8 +42,8 @@ func TestNormalizeMode(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{name: "auto over https", mode: "auto", scheme: "https", want: "packet-up"},
-		{name: "empty over https", mode: "", scheme: "https", want: "packet-up"},
+		{name: "auto over https", mode: "auto", scheme: "https", want: "stream-up"},
+		{name: "empty over https", mode: "", scheme: "https", want: "stream-up"},
 		{name: "stream-up", mode: "stream-up", scheme: "https", want: "stream-up"},
 		{name: "stream-one over https", mode: "stream-one", scheme: "https", want: "stream-one"},
 		{name: "packet-up over https", mode: "packet-up", scheme: "https", want: "packet-up"},

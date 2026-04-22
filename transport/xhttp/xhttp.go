@@ -249,14 +249,13 @@ func normalizeMode(mode, scheme, security string, hasDownloadSettings bool) (str
 		if scheme != "https" {
 			return "", fmt.Errorf("xhttp: auto mode without tls is not supported yet")
 		}
-		autoMode := "packet-up"
 		if strings.EqualFold(security, "reality") {
 			if hasDownloadSettings {
 				return "stream-up", nil
 			}
 			return "stream-one", nil
 		}
-		return autoMode, nil
+		return "stream-up", nil
 	case "stream-up":
 		return mode, nil
 	case "stream-one":

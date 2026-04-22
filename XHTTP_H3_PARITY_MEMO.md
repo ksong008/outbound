@@ -192,3 +192,71 @@ Recent outbound-side work already in the branch:
     - `TestH3AutoSupportsSequentialConnections`
     - `PATH=/tmp/gotool.UoBUAX/go/bin:$PATH GOTOOLCHAIN=local go test -timeout 90s ./transport/xhttp`
     - passed
+
+### 2026-04-22
+
+User-confirmed baseline:
+
+- `daed` action:
+  - `8751f51d`
+- test link:
+  - `vless://7c12c745-63a5-433d-9e60-022e469b5bd4@156.246.90.2:18444?type=xhttp&security=tls&host=office.mitsuha.me&path=%2Fxhttp&sni=office.mitsuha.me&allowInsecure=true&alpn=h3&mode=auto&fp=chrome#newvps-h3-cert-insecure`
+- user-observed result:
+  - H3 was visible in the UI
+  - the node was usable
+
+Chain behind that known-good baseline:
+
+- `daed@8751f51d`
+- `dae-wing@b3f92d1`
+- `dae@c206674`
+- `outbound@1476530`
+
+Important comparison result:
+
+- at `outbound@1476530`, `xhttp` treated plain TLS `mode=auto` as `stream-up`
+- later, during official parity alignment work, `mode=auto` for plain TLS was changed
+  to `packet-up`
+- this means the user's unchanged subscription link:
+  - `...&alpn=h3&mode=auto...`
+  no longer mapped to the same runtime behavior after the parity changes
+
+Most likely explanation for the later regression:
+
+- the dominant behavior change was not the link itself, but the meaning of
+  `mode=auto`
+- on the earlier known-good chain, the link effectively behaved like:
+  - `h3 + stream-up`
+- on later chains, the same link effectively behaved like:
+  - `h3 + packet-up`
+- the follow-up H3 work in this repo has mostly been trying to make that newer
+  `packet-up` path stable enough
+
+Current interpretation:
+
+- if the goal is to preserve the exact behavior the user had on `8751f51d`,
+  then `h3 + auto` is not the same experiment anymore once official parity
+  alignment is applied
+- the main regression suspect is therefore:
+  - `auto -> packet-up` behavior change
+  not the certificate, route import, or VPS configuration
+
+Experimental follow-up decided after this comparison:
+
+- restore plain TLS `auto` back to `stream-up`
+- keep the later lifecycle fixes:
+  - detached request lifetime
+  - no-op deadlines
+  - improved release timing
+  - H3 client reuse
+  - H3 client rotation
+- use CI-generated packages to test whether the later optimizations remain
+  effective when combined with the older `auto -> stream-up` behavior
+
+Latest local state for this experiment:
+
+- `normalizeMode()` for plain TLS now resolves:
+  - `auto -> stream-up`
+- local validation:
+  - `PATH=/tmp/gotool.UoBUAX/go/bin:$PATH GOTOOLCHAIN=local go test -timeout 90s ./transport/xhttp`
+  - passed
