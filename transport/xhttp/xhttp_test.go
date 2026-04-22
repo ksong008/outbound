@@ -332,6 +332,27 @@ func TestRequestClientClosesOnRoundTripError(t *testing.T) {
 	}
 }
 
+func TestRequestClientUploadOnlyErrorKeepsClientOpen(t *testing.T) {
+	closed := false
+	client := &requestClient{
+		rt: errorRoundTripper{},
+		closeFn: func() error {
+			closed = true
+			return nil
+		},
+	}
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
+	if _, err := client.RoundTripUploadOnly(req); err == nil {
+		t.Fatalf("expected upload-only round trip error")
+	}
+	if closed {
+		t.Fatalf("upload-only error should not close shared client immediately")
+	}
+	if client.IsClosed() {
+		t.Fatalf("upload-only error should keep client open")
+	}
+}
+
 func generateSelfSignedCert(t *testing.T) tls.Certificate {
 	t.Helper()
 

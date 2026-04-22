@@ -821,12 +821,20 @@ type requestClient struct {
 	mu      sync.Mutex
 }
 
-func (c *requestClient) RoundTrip(req *http.Request) (*http.Response, error) {
+func (c *requestClient) roundTrip(req *http.Request, closeOnErr bool) (*http.Response, error) {
 	resp, err := c.rt.RoundTrip(req)
-	if err != nil {
+	if err != nil && closeOnErr {
 		_ = c.Close()
 	}
 	return resp, err
+}
+
+func (c *requestClient) RoundTrip(req *http.Request) (*http.Response, error) {
+	return c.roundTrip(req, true)
+}
+
+func (c *requestClient) RoundTripUploadOnly(req *http.Request) (*http.Response, error) {
+	return c.roundTrip(req, false)
 }
 
 func (c *requestClient) Close() error {
@@ -1832,6 +1840,11 @@ func (c *Conn) finishUpload(rt requestRoundTripper, req *http.Request, onDone fu
 		defer onDone()
 	}
 	resp, err := rt.RoundTrip(req)
+	if uploadOnlyRT, ok := rt.(interface {
+		RoundTripUploadOnly(*http.Request) (*http.Response, error)
+	}); ok {
+		resp, err = uploadOnlyRT.RoundTripUploadOnly(req)
+	}
 	if err != nil {
 		c.uploadErr = err
 		return

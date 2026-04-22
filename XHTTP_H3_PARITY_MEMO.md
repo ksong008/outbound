@@ -260,3 +260,67 @@ Latest local state for this experiment:
 - local validation:
   - `PATH=/tmp/gotool.UoBUAX/go/bin:$PATH GOTOOLCHAIN=local go test -timeout 90s ./transport/xhttp`
   - passed
+
+Follow-up stability tweak after starting the `h3 + stream-up` list:
+
+- aligned upload-only error handling more closely with official `OpenStream(..., uploadOnly=true)` behavior
+- outbound now keeps a shared request client alive when the upload-only request
+  fails, instead of eagerly closing the whole client on any round-trip error
+- local validation:
+  - `TestRequestClientUploadOnlyErrorKeepsClientOpen`
+  - `PATH=/tmp/gotool.UoBUAX/go/bin:$PATH GOTOOLCHAIN=local go test -timeout 90s ./transport/xhttp`
+  - passed
+
+## H3 Stream-Up Stability Work List
+
+Confirmed context for this list:
+
+- current experiment chain uses:
+  - plain TLS `auto -> stream-up`
+- so current `h3 + auto` behavior should be analyzed as:
+  - `h3 + stream-up`
+
+Ordered optimization list:
+
+1. Download stream lifecycle
+   - inspect:
+     - `startDownload()`
+     - `ensureDownloadBody()`
+     - `Read()`
+   - objective:
+     - prevent the read side from stalling or timing out after the stream has
+       already been established
+
+2. Upload completion and close timing
+   - inspect:
+     - `finishUpload()`
+     - `CloseWrite()`
+     - `Conn.Close()`
+   - objective:
+     - ensure upload completion does not prematurely break the download stream
+
+3. H3 request-client release timing
+   - inspect:
+     - request client pool entries
+     - lease release timing
+     - pool eviction rules
+   - objective:
+     - avoid releasing a still-needed H3 client while the download side is
+       active
+
+4. Shared H3 client concurrency behavior
+   - inspect whether upload and download requests sharing one H3 transport can
+     interfere with each other
+   - objective:
+     - keep concurrent GET/POST traffic stable for browser-like use
+
+5. H3 `stream-up` regression coverage
+   - add tests for:
+     - repeated sequential H3 stream-up requests
+     - upload-finished / download-still-reading behavior
+     - concurrent short requests
+
+6. H3 keepalive / idle tuning
+   - only after lifecycle issues above are checked
+   - objective:
+     - reduce `timeout: no recent network activity` without masking a logic bug
