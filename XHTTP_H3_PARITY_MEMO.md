@@ -271,6 +271,18 @@ Follow-up stability tweak after starting the `h3 + stream-up` list:
   - `PATH=/tmp/gotool.UoBUAX/go/bin:$PATH GOTOOLCHAIN=local go test -timeout 90s ./transport/xhttp`
   - passed
 
+Latest A/B experiment note:
+
+- after user feedback that the generated build starting from `78ac6a01` made
+  H3 browsing worse, the most suspicious change was the upload-only shared
+  client behavior from `b90c66c`
+- current experiment:
+  - revert only that upload-only shared-client behavior
+  - keep the rest of the later H3 lifecycle and auto->stream-up experiment work
+- goal:
+  - determine whether preserving a shared H3 client after upload-only errors was
+    actually making later requests less stable
+
 ## H3 Stream-Up Stability Work List
 
 Confirmed context for this list:
