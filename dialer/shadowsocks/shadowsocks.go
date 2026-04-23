@@ -13,6 +13,7 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks"
+	_ "github.com/daeuniverse/outbound/protocol/shadowsocks_2022"
 	"github.com/daeuniverse/outbound/transport/mux"
 	"github.com/daeuniverse/outbound/transport/simpleobfs"
 	"github.com/daeuniverse/outbound/transport/tls"
@@ -119,6 +120,8 @@ func (s *Shadowsocks) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dia
 	switch s.Cipher {
 	case "aes-256-gcm", "aes-128-gcm", "chacha20-poly1305", "chacha20-ietf-poly1305":
 		nextDialerName = "shadowsocks"
+	case "2022-blake3-aes-256-gcm", "2022-blake3-aes-128-gcm":
+		nextDialerName = "shadowsocks_2022"
 	case "aes-128-cfb", "aes-192-cfb", "aes-256-cfb", "aes-128-ctr", "aes-192-ctr", "aes-256-ctr", "aes-128-ofb", "aes-192-ofb", "aes-256-ofb", "des-cfb", "bf-cfb", "cast5-cfb", "rc4-md5", "rc4-md5-6", "chacha20", "chacha20-ietf", "salsa20", "camellia-128-cfb", "camellia-192-cfb", "camellia-256-cfb", "idea-cfb", "rc2-cfb", "seed-cfb", "rc4", "none", "plain":
 		nextDialerName = "shadowsocks_stream"
 	default:
@@ -149,9 +152,16 @@ func ParseSSURL(u string) (data *Shadowsocks, err error) {
 		if err != nil {
 			return nil, false
 		}
-		username := u.User.String()
-		username, _ = common.Base64UrlDecode(username)
-		arr := strings.SplitN(username, ":", 2)
+		var arr []string
+		if u.User != nil {
+			if pwd, hasPwd := u.User.Password(); hasPwd {
+				arr = []string{u.User.Username(), pwd}
+			} else {
+				username := u.User.String()
+				username, _ = common.Base64UrlDecode(username)
+				arr = strings.SplitN(username, ":", 2)
+			}
+		}
 		if len(arr) != 2 {
 			return nil, false
 		}
@@ -279,9 +289,13 @@ func (s *Shadowsocks) ExportToURL() string {
 	// sip002
 	u := &url.URL{
 		Scheme:   "ss",
-		User:     url.User(strings.TrimSuffix(base64.URLEncoding.EncodeToString([]byte(s.Cipher+":"+s.Password)), "=")),
 		Host:     net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
 		Fragment: s.Name,
+	}
+	if strings.HasPrefix(strings.ToLower(s.Cipher), "2022-blake3-") {
+		u.User = url.UserPassword(s.Cipher, s.Password)
+	} else {
+		u.User = url.User(strings.TrimSuffix(base64.URLEncoding.EncodeToString([]byte(s.Cipher+":"+s.Password)), "="))
 	}
 	if s.Plugin.Name != "" {
 		q := u.Query()
