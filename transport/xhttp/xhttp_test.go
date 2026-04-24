@@ -137,6 +137,52 @@ func TestBuildXHTTPOptions(t *testing.T) {
 	}
 }
 
+func TestBuildXHTTPOptionsRejectsUnsupportedCombinations(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+		extra string
+		want string
+	}{
+		{
+			name: "stream-one with download settings",
+			mode: "stream-one",
+			extra: `{"downloadSettings":{"address":"example.com","port":443,"network":"xhttp","security":"tls","xhttpSettings":{"host":"example.com","path":"/download"}}}`,
+			want: "stream-one does not support downloadSettings",
+		},
+		{
+			name: "download settings mode override",
+			mode: "stream-up",
+			extra: `{"downloadSettings":{"address":"example.com","port":443,"network":"xhttp","security":"tls","xhttpSettings":{"host":"example.com","path":"/download","mode":"packet-up"}}}`,
+			want: "downloadSettings.xhttpSettings.mode is not supported yet",
+		},
+		{
+			name: "no sse header unsupported",
+			mode: "stream-up",
+			extra: `{"noSSEHeader":true}`,
+			want: "noSSEHeader is not supported yet",
+		},
+		{
+			name: "max buffered posts unsupported",
+			mode: "stream-up",
+			extra: `{"scMaxBufferedPosts":2}`,
+			want: "scMaxBufferedPosts is not supported yet",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := buildXHTTPOptions("https", "tls", tt.mode, tt.extra)
+			if err == nil {
+				t.Fatalf("expected error containing %q", tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected error containing %q, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
 func TestShouldUseH3(t *testing.T) {
 	tests := []struct {
 		alpn string

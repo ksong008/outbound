@@ -81,6 +81,28 @@ type XHTTPOptions struct {
 	UplinkChunkSize      rangedInt
 }
 
+func (o *XHTTPOptions) validate() error {
+	if o == nil {
+		return nil
+	}
+	if o.Mode == "stream-one" && o.DownloadSettings != nil {
+		return fmt.Errorf("xhttp: stream-one does not support downloadSettings")
+	}
+	if o.NoSSEHeader {
+		return fmt.Errorf("xhttp: noSSEHeader is not supported yet")
+	}
+	if o.ScMaxBufferedPosts > 0 {
+		return fmt.Errorf("xhttp: scMaxBufferedPosts is not supported yet")
+	}
+	if o.DownloadSettings != nil && o.DownloadSettings.XHTTPSettings.Mode != "" {
+		return fmt.Errorf("xhttp: downloadSettings.xhttpSettings.mode is not supported yet")
+	}
+	if o.DownloadSettings != nil && strings.TrimSpace(o.DownloadSettings.XHTTPSettings.Extra) != "" {
+		return fmt.Errorf("xhttp: downloadSettings.xhttpSettings.extra is not supported yet")
+	}
+	return nil
+}
+
 type extraConfig struct {
 	Headers          map[string]string       `json:"headers"`
 	NoGRPCHeader     bool                    `json:"noGRPCHeader"`
@@ -349,7 +371,7 @@ func buildXHTTPOptions(scheme, security, rawMode, rawExtra string) (*XHTTPOption
 		contentType = ""
 	}
 
-	return &XHTTPOptions{
+	options := &XHTTPOptions{
 		Mode:                mode,
 		Headers:             headers,
 		ContentType:         contentType,
@@ -373,7 +395,11 @@ func buildXHTTPOptions(scheme, security, rawMode, rawExtra string) (*XHTTPOption
 		UplinkDataPlacement: extra.UplinkDataPlacement,
 		UplinkDataKey:       extra.UplinkDataKey,
 		UplinkChunkSize:     extra.UplinkChunkSize,
-	}, nil
+	}
+	if err := options.validate(); err != nil {
+		return nil, err
+	}
+	return options, nil
 }
 
 func parseXmux(cfg *xmuxConfig) xmuxOptions {
