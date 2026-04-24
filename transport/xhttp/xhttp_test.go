@@ -109,6 +109,34 @@ func TestParseExtraInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestBuildXHTTPOptions(t *testing.T) {
+	opts, err := buildXHTTPOptions("https", "tls", "auto", `{"headers":{"User-Agent":"xray"},"noGRPCHeader":true,"scMaxEachPostBytes":"16-32","scMinPostsIntervalMs":25,"scMaxBufferedPosts":4,"sessionPlacement":"header"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.Mode != "stream-up" {
+		t.Fatalf("expected normalized mode stream-up, got %q", opts.Mode)
+	}
+	if opts.ContentType != "" {
+		t.Fatalf("expected noGRPCHeader to clear content type, got %q", opts.ContentType)
+	}
+	if opts.Headers.Get("User-Agent") != "xray" {
+		t.Fatalf("expected User-Agent header to be preserved")
+	}
+	if opts.PacketMaxBytes < 16 || opts.PacketMaxBytes > 32 {
+		t.Fatalf("expected packet max bytes in range [16,32], got %d", opts.PacketMaxBytes)
+	}
+	if opts.PacketMinGap != 25*time.Millisecond {
+		t.Fatalf("expected packet min gap 25ms, got %v", opts.PacketMinGap)
+	}
+	if opts.ScMaxBufferedPosts != 4 {
+		t.Fatalf("expected scMaxBufferedPosts=4, got %d", opts.ScMaxBufferedPosts)
+	}
+	if opts.SessionPlacement != "header" {
+		t.Fatalf("expected session placement to be kept, got %q", opts.SessionPlacement)
+	}
+}
+
 func TestShouldUseH3(t *testing.T) {
 	tests := []struct {
 		alpn string

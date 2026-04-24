@@ -55,6 +55,32 @@ type Dialer struct {
 	uplinkChunkSize     rangedInt
 }
 
+type XHTTPOptions struct {
+	Mode                 string
+	Headers              http.Header
+	ContentType          string
+	DownloadSettings     *downloadSettingsConfig
+	PacketMaxBytes       int
+	PacketMinGap         time.Duration
+	Xmux                 xmuxOptions
+	NoSSEHeader          bool
+	ScMaxBufferedPosts   int
+	XPaddingBytes        rangedInt
+	XPaddingObfsMode     bool
+	XPaddingKey          string
+	XPaddingHeader       string
+	XPaddingPlacement    string
+	XPaddingMethod       string
+	UplinkHTTPMethod     string
+	SessionPlacement     string
+	SessionKey           string
+	SeqPlacement         string
+	SeqKey               string
+	UplinkDataPlacement  string
+	UplinkDataKey        string
+	UplinkChunkSize      rangedInt
+}
+
 type extraConfig struct {
 	Headers          map[string]string       `json:"headers"`
 	NoGRPCHeader     bool                    `json:"noGRPCHeader"`
@@ -300,6 +326,54 @@ func parseExtra(raw string) (extraConfig, error) {
 		return extraConfig{}, fmt.Errorf("xhttp: parse extra: %w", err)
 	}
 	return cfg, nil
+}
+
+func buildXHTTPOptions(scheme, security, rawMode, rawExtra string) (*XHTTPOptions, error) {
+	extra, err := parseExtra(rawExtra)
+	if err != nil {
+		return nil, err
+	}
+
+	mode, err := normalizeMode(rawMode, scheme, security, extra.DownloadSettings != nil)
+	if err != nil {
+		return nil, err
+	}
+
+	headers := make(http.Header)
+	for key, value := range extra.Headers {
+		headers.Set(key, value)
+	}
+
+	contentType := "application/grpc"
+	if extra.NoGRPCHeader {
+		contentType = ""
+	}
+
+	return &XHTTPOptions{
+		Mode:                mode,
+		Headers:             headers,
+		ContentType:         contentType,
+		DownloadSettings:    extra.DownloadSettings,
+		PacketMaxBytes:      extra.ScMaxEachPostBytes.Pick(),
+		PacketMinGap:        time.Duration(extra.ScMinPostsIntervalMs.Pick()) * time.Millisecond,
+		Xmux:                parseXmux(extra.Xmux),
+		NoSSEHeader:         extra.NoSSEHeader,
+		ScMaxBufferedPosts:  extra.ScMaxBufferedPosts,
+		XPaddingBytes:       extra.XPaddingBytes,
+		XPaddingObfsMode:    extra.XPaddingObfsMode,
+		XPaddingKey:         extra.XPaddingKey,
+		XPaddingHeader:      extra.XPaddingHeader,
+		XPaddingPlacement:   extra.XPaddingPlacement,
+		XPaddingMethod:      extra.XPaddingMethod,
+		UplinkHTTPMethod:    extra.UplinkHTTPMethod,
+		SessionPlacement:    extra.SessionPlacement,
+		SessionKey:          extra.SessionKey,
+		SeqPlacement:        extra.SeqPlacement,
+		SeqKey:              extra.SeqKey,
+		UplinkDataPlacement: extra.UplinkDataPlacement,
+		UplinkDataKey:       extra.UplinkDataKey,
+		UplinkChunkSize:     extra.UplinkChunkSize,
+	}, nil
 }
 
 func parseXmux(cfg *xmuxConfig) xmuxOptions {
@@ -1214,11 +1288,7 @@ func NewDialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link stri
 	if security == "" && u.Scheme == "https" {
 		security = "tls"
 	}
-	mode, err := normalizeMode(query.Get("mode"), u.Scheme, security, strings.TrimSpace(query.Get("extra")) != "")
-	if err != nil {
-		return nil, err
-	}
-	extra, err := parseExtra(query.Get("extra"))
+	options, err := buildXHTTPOptions(u.Scheme, security, query.Get("mode"), query.Get("extra"))
 	if err != nil {
 		return nil, err
 	}
@@ -1246,44 +1316,36 @@ func NewDialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link stri
 	if err != nil {
 		return nil, err
 	}
-	downloadEndpoint, err := buildDownloadEndpoint(option, nextDialer, u.Host, host, u.Path, serverName, allowInsecure, alpn, utlsImitate, publicKey, shortID, spiderX, extra.DownloadSettings)
+	downloadEndpoint, err := buildDownloadEndpoint(option, nextDialer, u.Host, host, u.Path, serverName, allowInsecure, alpn, utlsImitate, publicKey, shortID, spiderX, options.DownloadSettings)
 	if err != nil {
 		return nil, err
-	}
-
-	headers := make(http.Header)
-	for key, value := range extra.Headers {
-		headers.Set(key, value)
-	}
-
-	contentType := "application/grpc"
-	if extra.NoGRPCHeader {
-		contentType = ""
 	}
 
 	return &Dialer{
 		uploadEndpoint:   uploadEndpoint,
 		downloadEndpoint: downloadEndpoint,
-		mode:             mode,
-		contentType:      contentType,
-		headers:          headers,
-		packetMaxBytes:   extra.ScMaxEachPostBytes.Pick(),
-		packetMinGap:     time.Duration(extra.ScMinPostsIntervalMs.Pick()) * time.Millisecond,
-		xmux:             parseXmux(extra.Xmux),
-		xPaddingBytes:    extra.XPaddingBytes,
-		xPaddingObfsMode: extra.XPaddingObfsMode,
-		xPaddingKey:      extra.XPaddingKey,
-		xPaddingHeader:   extra.XPaddingHeader,
-		xPaddingPlacement: extra.XPaddingPlacement,
-		xPaddingMethod:   extra.XPaddingMethod,
-		uplinkHTTPMethod: extra.UplinkHTTPMethod,
-		sessionPlacement: extra.SessionPlacement,
-		sessionKey:       extra.SessionKey,
-		seqPlacement:     extra.SeqPlacement,
-		seqKey:           extra.SeqKey,
-		uplinkDataPlacement: extra.UplinkDataPlacement,
-		uplinkDataKey:       extra.UplinkDataKey,
-		uplinkChunkSize:     extra.UplinkChunkSize,
+		mode:             options.Mode,
+		contentType:      options.ContentType,
+		headers:          options.Headers,
+		packetMaxBytes:   options.PacketMaxBytes,
+		packetMinGap:     options.PacketMinGap,
+		xmux:             options.Xmux,
+		xPaddingBytes:    options.XPaddingBytes,
+		xPaddingObfsMode: options.XPaddingObfsMode,
+		xPaddingKey:      options.XPaddingKey,
+		xPaddingHeader:   options.XPaddingHeader,
+		xPaddingPlacement: options.XPaddingPlacement,
+		xPaddingMethod:   options.XPaddingMethod,
+		uplinkHTTPMethod: options.UplinkHTTPMethod,
+		sessionPlacement: options.SessionPlacement,
+		sessionKey:       options.SessionKey,
+		seqPlacement:     options.SeqPlacement,
+		seqKey:           options.SeqKey,
+		uplinkDataPlacement: options.UplinkDataPlacement,
+		uplinkDataKey:       options.UplinkDataKey,
+		uplinkChunkSize:     options.UplinkChunkSize,
+		noSSEHeader:         options.NoSSEHeader,
+		scMaxBufferedPosts:  options.ScMaxBufferedPosts,
 	}, nil
 }
 
