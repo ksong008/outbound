@@ -35,8 +35,15 @@ var (
 
 func CleanGlobalClientConnectionCache() {
 	globalCCAccess.Lock()
-	defer globalCCAccess.Unlock()
+	old := globalCCMap
 	globalCCMap = make(map[string]*clientConnMeta)
+	globalCCAccess.Unlock()
+
+	for _, meta := range old {
+		if meta != nil && meta.cc != nil {
+			_ = meta.cc.Close()
+		}
+	}
 }
 
 type ccCanceller func()

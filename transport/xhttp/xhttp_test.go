@@ -8,21 +8,21 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math"
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-	"net/http/httptest"
-	"net/url"
-	"errors"
 
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/protocol/direct"
@@ -43,8 +43,8 @@ func TestNormalizeMode(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{name: "auto over https", mode: "auto", scheme: "https", want: "stream-up"},
-		{name: "empty over https", mode: "", scheme: "https", want: "stream-up"},
+		{name: "auto over https", mode: "auto", scheme: "https", want: "packet-up"},
+		{name: "empty over https", mode: "", scheme: "https", want: "packet-up"},
 		{name: "stream-up", mode: "stream-up", scheme: "https", want: "stream-up"},
 		{name: "stream-one over https", mode: "stream-one", scheme: "https", want: "stream-one"},
 		{name: "packet-up over https", mode: "packet-up", scheme: "https", want: "packet-up"},
@@ -111,12 +111,12 @@ func TestParseExtraInvalidJSON(t *testing.T) {
 }
 
 func TestBuildXHTTPOptions(t *testing.T) {
-	opts, err := buildXHTTPOptions("https", "tls", "auto", `{"headers":{"User-Agent":"xray"},"noGRPCHeader":true,"scMaxEachPostBytes":"16-32","scMinPostsIntervalMs":25,"scMaxBufferedPosts":4,"sessionPlacement":"header"}`)
+	opts, err := buildXHTTPOptions("https", "tls", "auto", `{"headers":{"User-Agent":"xray"},"noGRPCHeader":true,"scMaxEachPostBytes":"16-32","scMinPostsIntervalMs":25,"sessionPlacement":"header"}`)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if opts.Mode != "stream-up" {
-		t.Fatalf("expected normalized mode stream-up, got %q", opts.Mode)
+	if opts.Mode != "packet-up" {
+		t.Fatalf("expected normalized mode packet-up, got %q", opts.Mode)
 	}
 	if opts.ContentType != "" {
 		t.Fatalf("expected noGRPCHeader to clear content type, got %q", opts.ContentType)
@@ -130,44 +130,54 @@ func TestBuildXHTTPOptions(t *testing.T) {
 	if opts.PacketMinGap != 25*time.Millisecond {
 		t.Fatalf("expected packet min gap 25ms, got %v", opts.PacketMinGap)
 	}
-	if opts.ScMaxBufferedPosts != 4 {
-		t.Fatalf("expected scMaxBufferedPosts=4, got %d", opts.ScMaxBufferedPosts)
-	}
 	if opts.SessionPlacement != "header" {
 		t.Fatalf("expected session placement to be kept, got %q", opts.SessionPlacement)
 	}
 }
 
+func TestBuildXHTTPOptionsPacketUpDefaults(t *testing.T) {
+	opts, err := buildXHTTPOptions("https", "tls", "packet-up", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.PacketMaxBytes != defaultPacketMaxBytes {
+		t.Fatalf("expected default packet max bytes %d, got %d", defaultPacketMaxBytes, opts.PacketMaxBytes)
+	}
+	if opts.PacketMinGap != defaultPacketMinGap {
+		t.Fatalf("expected default packet min gap %v, got %v", defaultPacketMinGap, opts.PacketMinGap)
+	}
+}
+
 func TestBuildXHTTPOptionsRejectsUnsupportedCombinations(t *testing.T) {
 	tests := []struct {
-		name string
-		mode string
+		name  string
+		mode  string
 		extra string
-		want string
+		want  string
 	}{
 		{
-			name: "stream-one with download settings",
-			mode: "stream-one",
+			name:  "stream-one with download settings",
+			mode:  "stream-one",
 			extra: `{"downloadSettings":{"address":"example.com","port":443,"network":"xhttp","security":"tls","xhttpSettings":{"host":"example.com","path":"/download"}}}`,
-			want: "stream-one does not support downloadSettings",
+			want:  "stream-one does not support downloadSettings",
 		},
 		{
-			name: "download settings mode override",
-			mode: "stream-up",
+			name:  "download settings mode override",
+			mode:  "stream-up",
 			extra: `{"downloadSettings":{"address":"example.com","port":443,"network":"xhttp","security":"tls","xhttpSettings":{"host":"example.com","path":"/download","mode":"packet-up"}}}`,
-			want: "downloadSettings.xhttpSettings.mode is not supported yet",
+			want:  "downloadSettings.xhttpSettings.mode is not supported yet",
 		},
 		{
-			name: "no sse header unsupported",
-			mode: "stream-up",
+			name:  "no sse header unsupported",
+			mode:  "stream-up",
 			extra: `{"noSSEHeader":true}`,
-			want: "noSSEHeader is not supported yet",
+			want:  "noSSEHeader is not supported yet",
 		},
 		{
-			name: "max buffered posts unsupported",
-			mode: "stream-up",
+			name:  "max buffered posts unsupported",
+			mode:  "stream-up",
 			extra: `{"scMaxBufferedPosts":2}`,
-			want: "scMaxBufferedPosts is not supported yet",
+			want:  "scMaxBufferedPosts is not supported yet",
 		},
 	}
 
@@ -411,6 +421,11 @@ func TestAcquireRequestClientReusesH3Transport(t *testing.T) {
 		alpn:       "h3",
 		useH3:      true,
 	}
+	client := &requestClient{closeFn: func() error { return nil }}
+	key := requestClientReuseKey(ep, "tcp")
+	globalH3RequestPool.mu.Lock()
+	globalH3RequestPool.entries[key] = []*h3ClientEntry{newH3ClientEntry(client, xmuxOptions{})}
+	globalH3RequestPool.mu.Unlock()
 
 	lease1, err := d.acquireRequestClient(context.Background(), ep, "tcp", xmuxOptions{})
 	if err != nil {
@@ -456,6 +471,11 @@ func TestAcquireRequestClientRotatesH3ClientAfterRequestBudget(t *testing.T) {
 		useH3:      true,
 	}
 	opts := xmuxOptions{enabled: true, hMaxRequestTimes: 1}
+	client := &requestClient{closeFn: func() error { return nil }}
+	key := requestClientReuseKey(ep, "tcp")
+	globalH3RequestPool.mu.Lock()
+	globalH3RequestPool.entries[key] = []*h3ClientEntry{newH3ClientEntry(client, opts)}
+	globalH3RequestPool.mu.Unlock()
 
 	lease1, err := d.acquireRequestClient(context.Background(), ep, "tcp", opts)
 	if err != nil {
@@ -465,19 +485,13 @@ func TestAcquireRequestClientRotatesH3ClientAfterRequestBudget(t *testing.T) {
 	if err := lease1.release(); err != nil {
 		t.Fatalf("first release failed: %v", err)
 	}
-
-	lease2, err := d.acquireRequestClient(context.Background(), ep, "tcp", opts)
-	if err != nil {
-		t.Fatalf("second acquireRequestClient failed: %v", err)
+	if !lease1.client.IsClosed() {
+		t.Fatalf("expected exhausted H3 client to close on release")
 	}
-	if lease1.client == lease2.client {
-		t.Fatalf("expected H3 client rotation after request budget exhaustion")
-	}
-	if err := lease2.release(); err != nil {
-		t.Fatalf("second release failed: %v", err)
-	}
-	if err := lease2.client.Close(); err != nil {
-		t.Fatalf("final client close failed: %v", err)
+	globalH3RequestPool.mu.Lock()
+	defer globalH3RequestPool.mu.Unlock()
+	if got := len(globalH3RequestPool.entries[key]); got != 0 {
+		t.Fatalf("expected exhausted H3 client to be removed from pool, got %d entries", got)
 	}
 }
 
@@ -1201,7 +1215,10 @@ func TestPacketUpH2Integration(t *testing.T) {
 		sessions = make(map[string]*h3Session)
 	)
 	getSession := func(key string) *h3Session {
-		key = path.Base(key)
+		key = strings.Trim(strings.TrimPrefix(key, "/echo"), "/")
+		if sessionID, _, ok := strings.Cut(key, "/"); ok {
+			key = sessionID
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		if sess, ok := sessions[key]; ok {

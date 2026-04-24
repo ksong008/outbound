@@ -33,56 +33,56 @@ func xhttpErrf(kind, format string, args ...any) error {
 }
 
 type Dialer struct {
-	uploadEndpoint   endpoint
-	downloadEndpoint *endpoint
-	mode             string
-	contentType      string
-	headers          http.Header
-	packetMaxBytes   int
-	packetMinGap     time.Duration
-	xmux             xmuxOptions
-	noSSEHeader      bool
-	scMaxBufferedPosts int
-	xPaddingBytes    rangedInt
-	xPaddingObfsMode bool
-	xPaddingKey      string
-	xPaddingHeader   string
-	xPaddingPlacement string
-	xPaddingMethod   string
-	uplinkHTTPMethod string
-	sessionPlacement string
-	sessionKey       string
-	seqPlacement     string
-	seqKey           string
+	uploadEndpoint      endpoint
+	downloadEndpoint    *endpoint
+	mode                string
+	contentType         string
+	headers             http.Header
+	packetMaxBytes      int
+	packetMinGap        time.Duration
+	xmux                xmuxOptions
+	noSSEHeader         bool
+	scMaxBufferedPosts  int
+	xPaddingBytes       rangedInt
+	xPaddingObfsMode    bool
+	xPaddingKey         string
+	xPaddingHeader      string
+	xPaddingPlacement   string
+	xPaddingMethod      string
+	uplinkHTTPMethod    string
+	sessionPlacement    string
+	sessionKey          string
+	seqPlacement        string
+	seqKey              string
 	uplinkDataPlacement string
 	uplinkDataKey       string
 	uplinkChunkSize     rangedInt
 }
 
 type XHTTPOptions struct {
-	Mode                 string
-	Headers              http.Header
-	ContentType          string
-	DownloadSettings     *downloadSettingsConfig
-	PacketMaxBytes       int
-	PacketMinGap         time.Duration
-	Xmux                 xmuxOptions
-	NoSSEHeader          bool
-	ScMaxBufferedPosts   int
-	XPaddingBytes        rangedInt
-	XPaddingObfsMode     bool
-	XPaddingKey          string
-	XPaddingHeader       string
-	XPaddingPlacement    string
-	XPaddingMethod       string
-	UplinkHTTPMethod     string
-	SessionPlacement     string
-	SessionKey           string
-	SeqPlacement         string
-	SeqKey               string
-	UplinkDataPlacement  string
-	UplinkDataKey        string
-	UplinkChunkSize      rangedInt
+	Mode                string
+	Headers             http.Header
+	ContentType         string
+	DownloadSettings    *downloadSettingsConfig
+	PacketMaxBytes      int
+	PacketMinGap        time.Duration
+	Xmux                xmuxOptions
+	NoSSEHeader         bool
+	ScMaxBufferedPosts  int
+	XPaddingBytes       rangedInt
+	XPaddingObfsMode    bool
+	XPaddingKey         string
+	XPaddingHeader      string
+	XPaddingPlacement   string
+	XPaddingMethod      string
+	UplinkHTTPMethod    string
+	SessionPlacement    string
+	SessionKey          string
+	SeqPlacement        string
+	SeqKey              string
+	UplinkDataPlacement string
+	UplinkDataKey       string
+	UplinkChunkSize     rangedInt
 }
 
 func (o *XHTTPOptions) validate() error {
@@ -108,38 +108,38 @@ func (o *XHTTPOptions) validate() error {
 }
 
 type extraConfig struct {
-	Headers          map[string]string       `json:"headers"`
-	NoGRPCHeader     bool                    `json:"noGRPCHeader"`
-	DownloadSettings *downloadSettingsConfig `json:"downloadSettings"`
-	ScMaxEachPostBytes rangedInt             `json:"scMaxEachPostBytes"`
-	ScMinPostsIntervalMs rangedInt           `json:"scMinPostsIntervalMs"`
-	Xmux             *xmuxConfig             `json:"xmux"`
-	XPaddingBytes    rangedInt               `json:"xPaddingBytes"`
-	XPaddingObfsMode bool                    `json:"xPaddingObfsMode"`
-	XPaddingKey      string                  `json:"xPaddingKey"`
-	XPaddingHeader   string                  `json:"xPaddingHeader"`
-	XPaddingPlacement string                 `json:"xPaddingPlacement"`
-	XPaddingMethod   string                  `json:"xPaddingMethod"`
-	NoSSEHeader      bool                    `json:"noSSEHeader"`
-	ScMaxBufferedPosts int                   `json:"scMaxBufferedPosts"`
-	UplinkHTTPMethod string                  `json:"uplinkHTTPMethod"`
-	SessionPlacement string                  `json:"sessionPlacement"`
-	SessionKey       string                  `json:"sessionKey"`
-	SeqPlacement     string                  `json:"seqPlacement"`
-	SeqKey           string                  `json:"seqKey"`
-	UplinkDataPlacement string               `json:"uplinkDataPlacement"`
-	UplinkDataKey       string               `json:"uplinkDataKey"`
-	UplinkChunkSize     rangedInt            `json:"uplinkChunkSize"`
+	Headers              map[string]string       `json:"headers"`
+	NoGRPCHeader         bool                    `json:"noGRPCHeader"`
+	DownloadSettings     *downloadSettingsConfig `json:"downloadSettings"`
+	ScMaxEachPostBytes   rangedInt               `json:"scMaxEachPostBytes"`
+	ScMinPostsIntervalMs rangedInt               `json:"scMinPostsIntervalMs"`
+	Xmux                 *xmuxConfig             `json:"xmux"`
+	XPaddingBytes        rangedInt               `json:"xPaddingBytes"`
+	XPaddingObfsMode     bool                    `json:"xPaddingObfsMode"`
+	XPaddingKey          string                  `json:"xPaddingKey"`
+	XPaddingHeader       string                  `json:"xPaddingHeader"`
+	XPaddingPlacement    string                  `json:"xPaddingPlacement"`
+	XPaddingMethod       string                  `json:"xPaddingMethod"`
+	NoSSEHeader          bool                    `json:"noSSEHeader"`
+	ScMaxBufferedPosts   int                     `json:"scMaxBufferedPosts"`
+	UplinkHTTPMethod     string                  `json:"uplinkHTTPMethod"`
+	SessionPlacement     string                  `json:"sessionPlacement"`
+	SessionKey           string                  `json:"sessionKey"`
+	SeqPlacement         string                  `json:"seqPlacement"`
+	SeqKey               string                  `json:"seqKey"`
+	UplinkDataPlacement  string                  `json:"uplinkDataPlacement"`
+	UplinkDataKey        string                  `json:"uplinkDataKey"`
+	UplinkChunkSize      rangedInt               `json:"uplinkChunkSize"`
 }
 
 type downloadSettingsConfig struct {
-	Address       string               `json:"address"`
-	Port          int                  `json:"port"`
-	Network       string               `json:"network"`
-	Security      string               `json:"security"`
-	TLSSettings   tlsSettingsConfig    `json:"tlsSettings"`
+	Address         string                `json:"address"`
+	Port            int                   `json:"port"`
+	Network         string                `json:"network"`
+	Security        string                `json:"security"`
+	TLSSettings     tlsSettingsConfig     `json:"tlsSettings"`
 	RealitySettings realitySettingsConfig `json:"realitySettings"`
-	XHTTPSettings xhttpSettingsConfig  `json:"xhttpSettings"`
+	XHTTPSettings   xhttpSettingsConfig   `json:"xhttpSettings"`
 }
 
 type tlsSettingsConfig struct {
@@ -165,35 +165,35 @@ type xhttpSettingsConfig struct {
 }
 
 type endpoint struct {
-	dialer          netproxy.Dialer
-	nextDialer      netproxy.Dialer
-	addr            string
-	host            string
-	path            string
-	serverName      string
-	allowInsecure   bool
-	security        string
-	alpn            string
-	utlsImitate     string
-	publicKey       string
-	shortID         string
-	spiderX         string
-	useH3           bool
+	dialer        netproxy.Dialer
+	nextDialer    netproxy.Dialer
+	addr          string
+	host          string
+	path          string
+	serverName    string
+	allowInsecure bool
+	security      string
+	alpn          string
+	utlsImitate   string
+	publicKey     string
+	shortID       string
+	spiderX       string
+	useH3         bool
 }
 
 type xmuxConfig struct {
-	MaxConnections rangedInt `json:"maxConnections"`
-	MaxConcurrency rangedInt `json:"maxConcurrency"`
-	CMaxReuseTimes rangedInt `json:"cMaxReuseTimes"`
+	MaxConnections   rangedInt `json:"maxConnections"`
+	MaxConcurrency   rangedInt `json:"maxConcurrency"`
+	CMaxReuseTimes   rangedInt `json:"cMaxReuseTimes"`
 	HMaxRequestTimes rangedInt `json:"hMaxRequestTimes"`
 	HMaxReusableSecs rangedInt `json:"hMaxReusableSecs"`
 }
 
 type xmuxOptions struct {
-	enabled        bool
-	maxConnections int
-	maxConcurrency int
-	maxReuseTimes  int
+	enabled          bool
+	maxConnections   int
+	maxConcurrency   int
+	maxReuseTimes    int
 	hMaxRequestTimes int
 	hMaxReusableSecs int
 }
@@ -233,6 +233,8 @@ type rangedInt struct {
 
 const charsetBase62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 const requestClientIdleTimeout = 2 * time.Minute
+const defaultPacketMaxBytes = 1 << 20
+const defaultPacketMinGap = 30 * time.Millisecond
 const (
 	placementQueryInHeader = "queryinheader"
 	placementCookie        = "cookie"
@@ -309,7 +311,7 @@ func normalizeMode(mode, scheme, security string, hasDownloadSettings bool) (str
 			}
 			return "stream-one", nil
 		}
-		return "stream-up", nil
+		return "packet-up", nil
 	case "stream-up":
 		return mode, nil
 	case "stream-one":
@@ -402,6 +404,14 @@ func buildXHTTPOptions(scheme, security, rawMode, rawExtra string) (*XHTTPOption
 		UplinkDataKey:       extra.UplinkDataKey,
 		UplinkChunkSize:     extra.UplinkChunkSize,
 	}
+	if options.Mode == "packet-up" {
+		if options.PacketMaxBytes <= 0 {
+			options.PacketMaxBytes = defaultPacketMaxBytes
+		}
+		if options.PacketMinGap <= 0 {
+			options.PacketMinGap = defaultPacketMinGap
+		}
+	}
 	if err := options.validate(); err != nil {
 		return nil, err
 	}
@@ -421,10 +431,10 @@ func parseXmux(cfg *xmuxConfig) xmuxOptions {
 		return xmuxOptions{}
 	}
 	return xmuxOptions{
-		enabled:        true,
-		maxConnections: maxConnections,
-		maxConcurrency: maxConcurrency,
-		maxReuseTimes:  maxReuseTimes,
+		enabled:          true,
+		maxConnections:   maxConnections,
+		maxConcurrency:   maxConcurrency,
+		maxReuseTimes:    maxReuseTimes,
 		hMaxRequestTimes: hMaxRequestTimes,
 		hMaxReusableSecs: hMaxReusableSecs,
 	}
@@ -970,18 +980,19 @@ func (c *requestClient) IsClosed() bool {
 }
 
 type requestClientLease struct {
-	client  *requestClient
-	release func() error
+	client         *requestClient
+	release        func() error
 	consumeRequest func()
 }
 
 type h3ClientEntry struct {
-	client        *requestClient
-	active        int
-	leftUsage     int
-	leftRequests  int
-	unreusableAt  time.Time
-	lastUsed      time.Time
+	client       *requestClient
+	active       int
+	leftUsage    int
+	leftRequests int
+	unreusableAt time.Time
+	lastUsed     time.Time
+	opening      bool
 }
 
 type h3ClientPool struct {
@@ -992,6 +1003,87 @@ type h3ClientPool struct {
 var globalH3RequestPool = &h3ClientPool{
 	entries: make(map[string][]*h3ClientEntry),
 }
+
+func CleanGlobalPools() {
+	globalH3RequestPool.closeAll()
+	globalPacketUploadPool.closeAll()
+}
+
+func (p *h3ClientPool) closeAll() {
+	p.mu.Lock()
+	entries := p.entries
+	p.entries = make(map[string][]*h3ClientEntry)
+	p.mu.Unlock()
+
+	seen := make(map[*requestClient]struct{})
+	for _, list := range entries {
+		for _, entry := range list {
+			if entry == nil || entry.client == nil {
+				continue
+			}
+			if _, ok := seen[entry.client]; ok {
+				continue
+			}
+			seen[entry.client] = struct{}{}
+			_ = entry.client.Close()
+		}
+	}
+}
+
+func (p *h2Pool) closeAll() {
+	p.mu.Lock()
+	entries := p.entries
+	p.entries = make(map[string][]*h2PoolEntry)
+	p.mu.Unlock()
+
+	var conns []netproxy.Conn
+	for _, list := range entries {
+		for _, entry := range list {
+			if entry == nil || entry.rawConn == nil {
+				continue
+			}
+			conns = append(conns, entry.rawConn)
+		}
+	}
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+}
+
+type h3PacketConn struct {
+	conn       netproxy.PacketConn
+	localAddr  net.Addr
+	remoteAddr net.Addr
+}
+
+func newH3PacketConn(conn netproxy.PacketConn) *h3PacketConn {
+	return &h3PacketConn{
+		conn:       conn,
+		localAddr:  net.UDPAddrFromAddrPort(tuiccommon.GetUniqueFakeAddrPort()),
+		remoteAddr: net.UDPAddrFromAddrPort(tuiccommon.GetUniqueFakeAddrPort()),
+	}
+}
+
+func (c *h3PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	n, _, err := c.conn.ReadFrom(p)
+	return n, c.remoteAddr, err
+}
+
+func (c *h3PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
+	return c.conn.Write(p)
+}
+
+func (c *h3PacketConn) Close() error { return c.conn.Close() }
+
+func (c *h3PacketConn) LocalAddr() net.Addr { return c.localAddr }
+
+func (c *h3PacketConn) RemoteAddr() net.Addr { return c.remoteAddr }
+
+func (c *h3PacketConn) SetDeadline(t time.Time) error { return c.conn.SetDeadline(t) }
+
+func (c *h3PacketConn) SetReadDeadline(t time.Time) error { return c.conn.SetReadDeadline(t) }
+
+func (c *h3PacketConn) SetWriteDeadline(t time.Time) error { return c.conn.SetWriteDeadline(t) }
 
 func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network string) (*requestClient, error) {
 	if !ep.useH3 {
@@ -1006,10 +1098,6 @@ func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network str
 		}, nil
 	}
 
-	rAddr, err := net.ResolveUDPAddr("udp", ep.addr)
-	if err != nil {
-		return nil, err
-	}
 	var fakeConn net.PacketConn
 	tlsCfg := &tls.Config{
 		ServerName:         ep.serverName,
@@ -1039,12 +1127,8 @@ func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network str
 				conn.Close()
 				return nil, xhttpErrf("transport", "H3 requires PacketConn for %s", ep.addr)
 			}
-			fakeConn = netproxy.NewFakeNetPacketConn(
-				pc,
-				net.UDPAddrFromAddrPort(tuiccommon.GetUniqueFakeAddrPort()),
-				rAddr,
-			)
-			return quic.DialEarly(ctx, fakeConn, rAddr, tlsCfg, cfg)
+			fakeConn = newH3PacketConn(pc)
+			return quic.DialEarly(ctx, fakeConn, fakeConn.(*h3PacketConn).RemoteAddr(), tlsCfg, cfg)
 		},
 	}
 	return &requestClient{
@@ -1069,6 +1153,12 @@ func requestClientReuseKey(ep endpoint, network string) string {
 		ep.serverName,
 		ep.security,
 		ep.alpn,
+		strconv.FormatBool(ep.allowInsecure),
+		ep.utlsImitate,
+		ep.publicKey,
+		ep.shortID,
+		ep.spiderX,
+		strconv.FormatBool(ep.useH3),
 		network,
 	}, "|")
 }
@@ -1081,7 +1171,7 @@ func newH3ClientEntry(client *requestClient, opts xmuxOptions) *h3ClientEntry {
 		lastUsed:     time.Now(),
 	}
 	if opts.maxReuseTimes > 0 {
-		entry.leftUsage = opts.maxReuseTimes - 1
+		entry.leftUsage = opts.maxReuseTimes
 	}
 	if opts.hMaxRequestTimes > 0 {
 		entry.leftRequests = opts.hMaxRequestTimes
@@ -1093,7 +1183,7 @@ func newH3ClientEntry(client *requestClient, opts xmuxOptions) *h3ClientEntry {
 }
 
 func (e *h3ClientEntry) reusable(now time.Time) bool {
-	if e == nil || e.client == nil || e.client.IsClosed() {
+	if e == nil || e.opening || e.client == nil || e.client.IsClosed() {
 		return false
 	}
 	if e.active == 0 && requestClientIdleExpired(e.lastUsed, now) {
@@ -1109,6 +1199,14 @@ func (e *h3ClientEntry) reusable(now time.Time) bool {
 		return false
 	}
 	return true
+}
+
+func (e *h3ClientEntry) claim(now time.Time) {
+	e.active++
+	e.lastUsed = now
+	if e.leftUsage > 0 {
+		e.leftUsage--
+	}
 }
 
 func (p *h3ClientPool) release(key string, entry *h3ClientEntry) error {
@@ -1150,13 +1248,15 @@ func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network 
 
 	key := requestClientReuseKey(ep, network)
 	globalH3RequestPool.mu.Lock()
-	defer globalH3RequestPool.mu.Unlock()
 	now := time.Now()
 	entries := globalH3RequestPool.entries[key]
 	filtered := entries[:0]
 	eligible := make([]*h3ClientEntry, 0, len(entries))
 	for _, entry := range entries {
 		if entry == nil || entry.client == nil {
+			if entry != nil && entry.opening {
+				filtered = append(filtered, entry)
+			}
 			continue
 		}
 		retired := !entry.reusable(now)
@@ -1175,27 +1275,12 @@ func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network 
 	}
 	globalH3RequestPool.entries[key] = filtered
 
-	shouldCreate := len(filtered) == 0
-	if !shouldCreate && opts.maxConnections > 0 && len(filtered) < opts.maxConnections {
-		shouldCreate = true
-	}
-	if !shouldCreate && len(eligible) == 0 {
-		shouldCreate = true
-	}
-	if shouldCreate {
-		client, err := d.openRequestClient(ctx, ep, network)
-		if err != nil {
-			return nil, err
-		}
-		entry := newH3ClientEntry(client, opts)
-		entry.active = 1
-		entry.lastUsed = now
-		if entry.leftUsage > 0 {
-			entry.leftUsage--
-		}
-		globalH3RequestPool.entries[key] = append(globalH3RequestPool.entries[key], entry)
+	if len(eligible) > 0 {
+		entry := eligible[0]
+		entry.claim(now)
+		globalH3RequestPool.mu.Unlock()
 		return &requestClientLease{
-			client:  client,
+			client:  entry.client,
 			release: func() error { return globalH3RequestPool.release(key, entry) },
 			consumeRequest: func() {
 				globalH3RequestPool.mu.Lock()
@@ -1206,14 +1291,55 @@ func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network 
 			},
 		}, nil
 	}
-	entry := eligible[0]
-	entry.active++
-	entry.lastUsed = now
-	if entry.leftUsage > 0 {
-		entry.leftUsage--
+
+	if opts.maxConnections > 0 && len(filtered) >= opts.maxConnections {
+		globalH3RequestPool.mu.Unlock()
+		return nil, xhttpErrf("pool", "no available H3 request client for %s: maxConnections=%d", ep.addr, opts.maxConnections)
 	}
+
+	entry := newH3ClientEntry(nil, opts)
+	entry.opening = true
+	entry.claim(now)
+	globalH3RequestPool.entries[key] = append(filtered, entry)
+	globalH3RequestPool.mu.Unlock()
+
+	client, err := d.openRequestClient(ctx, ep, network)
+	if err != nil {
+		globalH3RequestPool.mu.Lock()
+		entries := globalH3RequestPool.entries[key]
+		for i, candidate := range entries {
+			if candidate == entry {
+				globalH3RequestPool.entries[key] = append(entries[:i], entries[i+1:]...)
+				break
+			}
+		}
+		if len(globalH3RequestPool.entries[key]) == 0 {
+			delete(globalH3RequestPool.entries, key)
+		}
+		globalH3RequestPool.mu.Unlock()
+		return nil, err
+	}
+
+	globalH3RequestPool.mu.Lock()
+	entries = globalH3RequestPool.entries[key]
+	inserted := false
+	for _, candidate := range entries {
+		if candidate == entry {
+			inserted = true
+			break
+		}
+	}
+	if !inserted {
+		globalH3RequestPool.mu.Unlock()
+		_ = client.Close()
+		return nil, xhttpErrf("pool", "H3 request client pool was cleaned while opening %s", ep.addr)
+	}
+	entry.client = client
+	entry.opening = false
+	globalH3RequestPool.mu.Unlock()
+
 	return &requestClientLease{
-		client:  entry.client,
+		client:  client,
 		release: func() error { return globalH3RequestPool.release(key, entry) },
 		consumeRequest: func() {
 			globalH3RequestPool.mu.Lock()
@@ -1235,6 +1361,12 @@ func packetUploadReuseKey(ep endpoint) string {
 		ep.serverName,
 		ep.security,
 		ep.alpn,
+		strconv.FormatBool(ep.allowInsecure),
+		ep.utlsImitate,
+		ep.publicKey,
+		ep.shortID,
+		ep.spiderX,
+		strconv.FormatBool(ep.useH3),
 	}, "|")
 }
 
@@ -1253,37 +1385,47 @@ func (p *h2Pool) acquire(ctx context.Context, ep endpoint, opts xmuxOptions, ope
 
 	key := packetUploadReuseKey(ep)
 	p.mu.Lock()
-	for _, entry := range p.entries[key] {
-		if entry.active == 0 && requestClientIdleExpired(entry.lastUsed, time.Now()) {
+	now := time.Now()
+	entries := p.entries[key]
+	filtered := entries[:0]
+	for i, entry := range entries {
+		if entry == nil || entry.rawConn == nil || entry.h2Conn == nil {
 			continue
 		}
-		if !entry.h2Conn.CanTakeNewRequest() {
+		retired := !entry.h2Conn.CanTakeNewRequest() ||
+			entry.leftRequests <= 0 ||
+			(!entry.unreusableAt.IsZero() && now.After(entry.unreusableAt)) ||
+			requestClientIdleExpired(entry.lastUsed, now) ||
+			(entry.maxReuseTimes > 0 && entry.reuseCount >= entry.maxReuseTimes)
+		if entry.active == 0 && retired {
+			_ = entry.rawConn.Close()
 			continue
 		}
-		if entry.leftRequests == 0 {
-			continue
-		}
-		if !entry.unreusableAt.IsZero() && time.Now().After(entry.unreusableAt) {
+		filtered = append(filtered, entry)
+		if retired {
 			continue
 		}
 		if entry.maxConcurrency > 0 && entry.active >= entry.maxConcurrency {
 			continue
 		}
-		if entry.maxReuseTimes > 0 && entry.reuseCount >= entry.maxReuseTimes {
-			continue
-		}
 		entry.active++
 		entry.reuseCount++
-		entry.lastUsed = time.Now()
-		if entry.leftRequests > 0 {
+		entry.lastUsed = now
+		if entry.leftRequests > 0 && entry.leftRequests != math.MaxInt32 {
 			entry.leftRequests--
 		}
+		filtered = append(filtered, entries[i+1:]...)
+		p.entries[key] = filtered
 		p.mu.Unlock()
 		return &pooledH2Lease{
 			rawConn: entry.rawConn,
 			h2Conn:  entry.h2Conn,
 			release: func() error { return p.release(key, entry) },
 		}, nil
+	}
+	p.entries[key] = filtered
+	if len(filtered) == 0 {
+		delete(p.entries, key)
 	}
 	p.mu.Unlock()
 
@@ -1307,8 +1449,11 @@ func (p *h2Pool) acquire(ctx context.Context, ep endpoint, opts xmuxOptions, ope
 		reuseCount:     1,
 		maxConcurrency: opts.maxConcurrency,
 		maxReuseTimes:  opts.maxReuseTimes,
-		leftRequests:   opts.hMaxRequestTimes,
+		leftRequests:   math.MaxInt32,
 		lastUsed:       time.Now(),
+	}
+	if opts.hMaxRequestTimes > 0 {
+		entry.leftRequests = opts.hMaxRequestTimes - 1
 	}
 	if opts.hMaxReusableSecs > 0 {
 		entry.unreusableAt = time.Now().Add(time.Duration(opts.hMaxReusableSecs) * time.Second)
@@ -1327,8 +1472,13 @@ func (p *h2Pool) release(key string, entry *h2PoolEntry) error {
 	if entry.active > 0 {
 		entry.active--
 	}
-	entry.lastUsed = time.Now()
-	shouldClose := !entry.h2Conn.CanTakeNewRequest() || (entry.maxReuseTimes > 0 && entry.reuseCount >= entry.maxReuseTimes && entry.active == 0)
+	now := time.Now()
+	entry.lastUsed = now
+	shouldClose := !entry.h2Conn.CanTakeNewRequest() ||
+		(entry.maxReuseTimes > 0 && entry.reuseCount >= entry.maxReuseTimes) ||
+		entry.leftRequests <= 0 ||
+		(!entry.unreusableAt.IsZero() && now.After(entry.unreusableAt)) ||
+		requestClientIdleExpired(entry.lastUsed, now)
 	if shouldClose && entry.active == 0 {
 		entries := p.entries[key]
 		for i, candidate := range entries {
@@ -1390,25 +1540,25 @@ func NewDialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link stri
 	}
 
 	return &Dialer{
-		uploadEndpoint:   uploadEndpoint,
-		downloadEndpoint: downloadEndpoint,
-		mode:             options.Mode,
-		contentType:      options.ContentType,
-		headers:          options.Headers,
-		packetMaxBytes:   options.PacketMaxBytes,
-		packetMinGap:     options.PacketMinGap,
-		xmux:             options.Xmux,
-		xPaddingBytes:    options.XPaddingBytes,
-		xPaddingObfsMode: options.XPaddingObfsMode,
-		xPaddingKey:      options.XPaddingKey,
-		xPaddingHeader:   options.XPaddingHeader,
-		xPaddingPlacement: options.XPaddingPlacement,
-		xPaddingMethod:   options.XPaddingMethod,
-		uplinkHTTPMethod: options.UplinkHTTPMethod,
-		sessionPlacement: options.SessionPlacement,
-		sessionKey:       options.SessionKey,
-		seqPlacement:     options.SeqPlacement,
-		seqKey:           options.SeqKey,
+		uploadEndpoint:      uploadEndpoint,
+		downloadEndpoint:    downloadEndpoint,
+		mode:                options.Mode,
+		contentType:         options.ContentType,
+		headers:             options.Headers,
+		packetMaxBytes:      options.PacketMaxBytes,
+		packetMinGap:        options.PacketMinGap,
+		xmux:                options.Xmux,
+		xPaddingBytes:       options.XPaddingBytes,
+		xPaddingObfsMode:    options.XPaddingObfsMode,
+		xPaddingKey:         options.XPaddingKey,
+		xPaddingHeader:      options.XPaddingHeader,
+		xPaddingPlacement:   options.XPaddingPlacement,
+		xPaddingMethod:      options.XPaddingMethod,
+		uplinkHTTPMethod:    options.UplinkHTTPMethod,
+		sessionPlacement:    options.SessionPlacement,
+		sessionKey:          options.SessionKey,
+		seqPlacement:        options.SeqPlacement,
+		seqKey:              options.SeqKey,
 		uplinkDataPlacement: options.UplinkDataPlacement,
 		uplinkDataKey:       options.UplinkDataKey,
 		uplinkChunkSize:     options.UplinkChunkSize,
@@ -1446,7 +1596,11 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		Host:   downloadEndpoint.addr,
 		Path:   downloadEndpoint.path,
 	}).String()
-	requestCtx := context.WithoutCancel(ctx)
+	requestCtx, requestCancel := context.WithCancel(context.WithoutCancel(ctx))
+	releaseOnError := func() {
+		requestCancel()
+		_ = uploadLease.release()
+	}
 
 	switch d.mode {
 	case "stream-up":
@@ -1455,7 +1609,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		if d.downloadEndpoint != nil {
 			downloadLease, err = d.acquireRequestClient(ctx, downloadEndpoint, network, d.xmux)
 			if err != nil {
-				_ = uploadLease.release()
+				releaseOnError()
 				return nil, err
 			}
 			downloadClient = downloadLease.client
@@ -1463,7 +1617,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 
 		downloadReq, err := http.NewRequestWithContext(requestCtx, http.MethodGet, downloadTargetURL, nil)
 		if err != nil {
-			_ = uploadLease.release()
+			releaseOnError()
 			if downloadClient != uploadClient {
 				_ = downloadLease.release()
 			}
@@ -1474,7 +1628,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		downloadLease.consumeRequest()
 		downloadResp, err := downloadClient.RoundTrip(downloadReq)
 		if err != nil {
-			_ = uploadLease.release()
+			releaseOnError()
 			if downloadClient != uploadClient {
 				_ = downloadLease.release()
 			}
@@ -1482,7 +1636,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		}
 		if downloadResp.StatusCode != http.StatusOK {
 			downloadResp.Body.Close()
-			_ = uploadLease.release()
+			releaseOnError()
 			if downloadClient != uploadClient {
 				_ = downloadLease.release()
 			}
@@ -1493,7 +1647,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		uploadReq, err := http.NewRequestWithContext(requestCtx, d.normalizedUplinkHTTPMethod(), uploadTargetURL, pr)
 		if err != nil {
 			downloadResp.Body.Close()
-			_ = uploadLease.release()
+			releaseOnError()
 			if downloadClient != uploadClient {
 				_ = downloadLease.release()
 			}
@@ -1504,13 +1658,14 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		uploadLease.consumeRequest()
 
 		conn := &Conn{
-			uploadConn:   uploadClient.rawConn,
-			downloadConn: downloadClient.rawConn,
-			uploadRelease: uploadLease.release,
-			downloadRelease: downloadLease.release,
-			sharedRelease: uploadClient == downloadClient,
-			uploadBody:   pw,
+			uploadConn:        uploadClient.rawConn,
+			downloadConn:      downloadClient.rawConn,
+			uploadRelease:     uploadLease.release,
+			downloadRelease:   downloadLease.release,
+			sharedRelease:     uploadClient == downloadClient,
+			uploadBody:        pw,
 			releaseWithBodies: true,
+			requestCancel:     requestCancel,
 		}
 		if uploadClient == downloadClient {
 			releaseGroup := newSharedReleaseGroup(2, uploadLease.release)
@@ -1525,7 +1680,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		pr, pw := io.Pipe()
 		uploadReq, err := http.NewRequestWithContext(requestCtx, d.normalizedUplinkHTTPMethod(), uploadTargetURL, pr)
 		if err != nil {
-			_ = uploadLease.release()
+			releaseOnError()
 			return nil, err
 		}
 		uploadReq.Host = d.uploadEndpoint.host
@@ -1533,14 +1688,15 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		uploadLease.consumeRequest()
 
 		conn := &Conn{
-			uploadConn:   uploadClient.rawConn,
-			downloadConn: uploadClient.rawConn,
-			uploadRelease: uploadLease.release,
-			downloadRelease: uploadLease.release,
-			sharedRelease: true,
+			uploadConn:        uploadClient.rawConn,
+			downloadConn:      uploadClient.rawConn,
+			uploadRelease:     uploadLease.release,
+			downloadRelease:   uploadLease.release,
+			sharedRelease:     true,
 			releaseWithBodies: true,
-			uploadBody:   pw,
-			respCh:       make(chan responseResult, 1),
+			uploadBody:        pw,
+			respCh:            make(chan responseResult, 1),
+			requestCancel:     requestCancel,
 		}
 		go conn.startStreamOne(uploadClient, uploadReq, func() { _ = uploadLease.release() })
 		return conn, nil
@@ -1550,7 +1706,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		if d.downloadEndpoint != nil {
 			downloadLease, err = d.acquireRequestClient(ctx, downloadEndpoint, network, d.xmux)
 			if err != nil {
-				_ = uploadLease.release()
+				releaseOnError()
 				return nil, err
 			}
 			downloadClient = downloadLease.client
@@ -1558,7 +1714,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 
 		downloadReq, err := http.NewRequestWithContext(requestCtx, http.MethodGet, downloadTargetURL, nil)
 		if err != nil {
-			_ = uploadLease.release()
+			releaseOnError()
 			if downloadClient != uploadClient {
 				_ = downloadLease.release()
 			}
@@ -1569,13 +1725,14 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		downloadLease.consumeRequest()
 
 		conn := &Conn{
-			uploadConn:   uploadClient.rawConn,
-			downloadConn: downloadClient.rawConn,
-			uploadRelease: uploadLease.release,
-			downloadRelease: downloadLease.release,
-			sharedRelease: uploadClient == downloadClient,
+			uploadConn:        uploadClient.rawConn,
+			downloadConn:      downloadClient.rawConn,
+			uploadRelease:     uploadLease.release,
+			downloadRelease:   downloadLease.release,
+			sharedRelease:     uploadClient == downloadClient,
 			releaseWithBodies: true,
-			respCh:        make(chan responseResult, 1),
+			respCh:            make(chan responseResult, 1),
+			requestCancel:     requestCancel,
 		}
 		packetFlushDelay := 15 * time.Millisecond
 		usePerRequestH3Upload := d.uploadEndpoint.useH3
@@ -1670,7 +1827,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		}
 		return conn, nil
 	default:
-		_ = uploadLease.release()
+		releaseOnError()
 		return nil, xhttpErrf("config", "mode %q is not supported yet", d.mode)
 	}
 }
@@ -1721,16 +1878,17 @@ func (d *Dialer) buildPacketUploader(reqCtx context.Context, uploadRT requestRou
 }
 
 type Conn struct {
-	uploadConn   netproxy.Conn
-	downloadConn netproxy.Conn
-	uploadRelease func() error
-	downloadRelease func() error
-	sharedRelease bool
+	uploadConn        netproxy.Conn
+	downloadConn      netproxy.Conn
+	uploadRelease     func() error
+	downloadRelease   func() error
+	sharedRelease     bool
 	releaseWithBodies bool
-	uploadBody   *io.PipeWriter
-	downloadBody io.ReadCloser
-	packetUpload func([]byte) error
-	packetClose  func() error
+	uploadBody        *io.PipeWriter
+	downloadBody      io.ReadCloser
+	packetUpload      func([]byte) error
+	packetClose       func() error
+	requestCancel     context.CancelFunc
 
 	closeOnce sync.Once
 	uploadErr error
@@ -1795,23 +1953,23 @@ func wrapManagedReadCloser(rc io.ReadCloser, onClose func()) io.ReadCloser {
 }
 
 type packetBatchUploader struct {
-	mu            sync.Mutex
-	cond          *sync.Cond
-	buf           bytes.Buffer
-	closed        bool
-	err           error
-	wg            sync.WaitGroup
-	flushDelay    time.Duration
-	maxUploadSize int
-	minGap        time.Duration
-	seq           uint64
-	reqCtx        context.Context
-	uploadRT      requestRoundTripper
-	acquireUpload func() (*requestClientLease, error)
+	mu              sync.Mutex
+	cond            *sync.Cond
+	buf             bytes.Buffer
+	closed          bool
+	err             error
+	wg              sync.WaitGroup
+	flushDelay      time.Duration
+	maxUploadSize   int
+	minGap          time.Duration
+	seq             uint64
+	reqCtx          context.Context
+	uploadRT        requestRoundTripper
+	acquireUpload   func() (*requestClientLease, error)
 	uploadTargetURL string
-	host          string
-	dialer        *Dialer
-	sessionID     string
+	host            string
+	dialer          *Dialer
+	sessionID       string
 }
 
 func newPacketBatchUploader(
@@ -2051,18 +2209,44 @@ func (c *Conn) Write(p []byte) (n int, err error) {
 }
 
 func (c *Conn) CloseWrite() error {
+	var err error
 	if c.packetClose != nil {
-		return c.packetClose()
+		err = c.packetClose()
+	} else if c.uploadBody != nil {
+		err = c.uploadBody.Close()
 	}
-	if c.uploadBody == nil {
-		return nil
+	if err != nil {
+		c.cancelRequests()
 	}
-	return c.uploadBody.Close()
+	return err
+}
+
+func (c *Conn) cancelRequests() {
+	if c.requestCancel != nil {
+		c.requestCancel()
+	}
+}
+
+func (c *Conn) closePendingDownloadBody() {
+	if c.respCh == nil {
+		return
+	}
+	select {
+	case result := <-c.respCh:
+		if result.err != nil {
+			c.uploadErr = result.err
+		}
+		if result.body != nil {
+			_ = result.body.Close()
+		}
+	default:
+	}
 }
 
 func (c *Conn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
+		c.cancelRequests()
 		if c.packetClose != nil {
 			err = c.packetClose()
 		}
@@ -2072,6 +2256,7 @@ func (c *Conn) Close() error {
 		if c.downloadBody != nil {
 			_ = c.downloadBody.Close()
 		}
+		c.closePendingDownloadBody()
 		if c.releaseWithBodies {
 			return
 		}
@@ -2080,10 +2265,10 @@ func (c *Conn) Close() error {
 		} else if c.uploadConn != nil {
 			err = c.uploadConn.Close()
 		}
-			if c.downloadRelease != nil && !c.sharedRelease {
-				_ = c.downloadRelease()
-			} else if c.downloadConn != nil && c.downloadConn != c.uploadConn {
-				_ = c.downloadConn.Close()
+		if c.downloadRelease != nil && !c.sharedRelease {
+			_ = c.downloadRelease()
+		} else if c.downloadConn != nil && c.downloadConn != c.uploadConn {
+			_ = c.downloadConn.Close()
 		}
 	})
 	return err

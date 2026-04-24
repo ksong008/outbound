@@ -28,8 +28,15 @@ type httpTripperClient struct {
 
 func CleanGlobalRoundTripperCache() {
 	globalRoundTripperCacheAccess.Lock()
-	defer globalRoundTripperCacheAccess.Unlock()
+	old := globalRoundTripperCacheMap
 	globalRoundTripperCacheMap = make(map[string]http.RoundTripper)
+	globalRoundTripperCacheAccess.Unlock()
+
+	for _, rt := range old {
+		if closer, ok := rt.(interface{ CloseIdleConnections() }); ok {
+			closer.CloseIdleConnections()
+		}
+	}
 }
 
 func (c *httpTripperClient) RoundTrip(ctx context.Context, req Request) (resp Response, err error) {
