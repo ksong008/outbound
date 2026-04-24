@@ -28,6 +28,10 @@ import (
 	"golang.org/x/net/http2"
 )
 
+func xhttpErrf(kind, format string, args ...any) error {
+	return fmt.Errorf("xhttp/%s: %s", kind, fmt.Sprintf(format, args...))
+}
+
 type Dialer struct {
 	uploadEndpoint   endpoint
 	downloadEndpoint *endpoint
@@ -86,19 +90,19 @@ func (o *XHTTPOptions) validate() error {
 		return nil
 	}
 	if o.Mode == "stream-one" && o.DownloadSettings != nil {
-		return fmt.Errorf("xhttp: stream-one does not support downloadSettings")
+		return xhttpErrf("config", "stream-one does not support downloadSettings")
 	}
 	if o.NoSSEHeader {
-		return fmt.Errorf("xhttp: noSSEHeader is not supported yet")
+		return xhttpErrf("config", "noSSEHeader is not supported yet")
 	}
 	if o.ScMaxBufferedPosts > 0 {
-		return fmt.Errorf("xhttp: scMaxBufferedPosts is not supported yet")
+		return xhttpErrf("config", "scMaxBufferedPosts is not supported yet")
 	}
 	if o.DownloadSettings != nil && o.DownloadSettings.XHTTPSettings.Mode != "" {
-		return fmt.Errorf("xhttp: downloadSettings.xhttpSettings.mode is not supported yet")
+		return xhttpErrf("config", "downloadSettings.xhttpSettings.mode is not supported yet")
 	}
 	if o.DownloadSettings != nil && strings.TrimSpace(o.DownloadSettings.XHTTPSettings.Extra) != "" {
-		return fmt.Errorf("xhttp: downloadSettings.xhttpSettings.extra is not supported yet")
+		return xhttpErrf("config", "downloadSettings.xhttpSettings.extra is not supported yet")
 	}
 	return nil
 }
@@ -297,7 +301,7 @@ func normalizeMode(mode, scheme, security string, hasDownloadSettings bool) (str
 	switch mode {
 	case "", "auto":
 		if scheme != "https" {
-			return "", fmt.Errorf("xhttp: auto mode without tls is not supported yet")
+			return "", xhttpErrf("config", "auto mode without tls is not supported yet")
 		}
 		if strings.EqualFold(security, "reality") {
 			if hasDownloadSettings {
@@ -312,14 +316,14 @@ func normalizeMode(mode, scheme, security string, hasDownloadSettings bool) (str
 		if scheme == "https" {
 			return mode, nil
 		}
-		return "", fmt.Errorf("xhttp: stream-one without tls is not supported yet")
+		return "", xhttpErrf("config", "stream-one without tls is not supported yet")
 	case "packet-up":
 		if scheme == "https" {
 			return mode, nil
 		}
-		return "", fmt.Errorf("xhttp: packet-up without tls is not supported yet")
+		return "", xhttpErrf("config", "packet-up without tls is not supported yet")
 	default:
-		return "", fmt.Errorf("xhttp: unsupported mode %q", mode)
+		return "", xhttpErrf("config", "unsupported mode %q", mode)
 	}
 }
 
@@ -347,7 +351,7 @@ func parseExtra(raw string) (extraConfig, error) {
 	}
 	var cfg extraConfig
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
-		return extraConfig{}, fmt.Errorf("xhttp: parse extra: %w", err)
+		return extraConfig{}, xhttpErrf("config", "parse extra: %v", err)
 	}
 	return cfg, nil
 }
@@ -583,7 +587,7 @@ func (d *Dialer) applyPayloadToRequest(req *http.Request, payload []byte) error 
 			req.AddCookie(&http.Cookie{Name: fmt.Sprintf("%s_%d", key, i), Value: chunk, Path: "/"})
 		}
 	default:
-		return fmt.Errorf("xhttp: unsupported uplink data placement %q", d.uplinkDataPlacement)
+		return xhttpErrf("config", "unsupported uplink data placement %q", d.uplinkDataPlacement)
 	}
 	return nil
 }
@@ -733,7 +737,7 @@ func newSecureEndpoint(
 	}
 	if strings.EqualFold(security, "reality") {
 		if shouldUseH3(alpn) {
-			return endpoint{}, fmt.Errorf("xhttp: reality with h3 is not supported")
+			return endpoint{}, xhttpErrf("endpoint", "reality with h3 is not supported")
 		}
 		realityURL := url.URL{
 			Scheme: "reality",
@@ -819,10 +823,10 @@ func buildDownloadEndpoint(
 		return nil, nil
 	}
 	if cfg.Network != "" && !strings.EqualFold(cfg.Network, "xhttp") {
-		return nil, fmt.Errorf("xhttp: downloadSettings network %q is not supported", cfg.Network)
+		return nil, xhttpErrf("config", "downloadSettings network %q is not supported", cfg.Network)
 	}
 	if cfg.Security != "" && !strings.EqualFold(cfg.Security, "tls") && !strings.EqualFold(cfg.Security, "reality") {
-		return nil, fmt.Errorf("xhttp: downloadSettings security %q is not supported", cfg.Security)
+		return nil, xhttpErrf("config", "downloadSettings security %q is not supported", cfg.Security)
 	}
 
 	addr := mainAddr
@@ -1033,7 +1037,7 @@ func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network str
 			pc, ok := conn.(netproxy.PacketConn)
 			if !ok {
 				conn.Close()
-				return nil, fmt.Errorf("xhttp: H3 requires PacketConn for %s", ep.addr)
+				return nil, xhttpErrf("transport", "H3 requires PacketConn for %s", ep.addr)
 			}
 			fakeConn = netproxy.NewFakeNetPacketConn(
 				pc,
@@ -1482,7 +1486,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			if downloadClient != uploadClient {
 				_ = downloadLease.release()
 			}
-			return nil, fmt.Errorf("xhttp: download path returned %s", downloadResp.Status)
+			return nil, xhttpErrf("download", "download path returned %s", downloadResp.Status)
 		}
 
 		pr, pw := io.Pipe()
@@ -1667,7 +1671,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		return conn, nil
 	default:
 		_ = uploadLease.release()
-		return nil, fmt.Errorf("xhttp: mode %q is not supported yet", d.mode)
+		return nil, xhttpErrf("config", "mode %q is not supported yet", d.mode)
 	}
 }
 
@@ -1706,7 +1710,7 @@ func (d *Dialer) buildPacketUploader(reqCtx context.Context, uploadRT requestRou
 				io.Copy(io.Discard, resp.Body)
 			}()
 			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("xhttp: packet-up path returned %s", resp.Status)
+				return xhttpErrf("packet-up", "packet-up path returned %s", resp.Status)
 			}
 			if i != len(chunks)-1 && d.packetMinGap > 0 {
 				time.Sleep(d.packetMinGap)
@@ -1934,7 +1938,7 @@ func (u *packetBatchUploader) run() {
 			_ = lease.release()
 		}
 		if resp.StatusCode != http.StatusOK {
-			u.setErr(fmt.Errorf("xhttp: packet-up path returned %s", resp.Status))
+			u.setErr(xhttpErrf("packet-up", "packet-up path returned %s", resp.Status))
 			return
 		}
 		if u.minGap > 0 {
@@ -1965,7 +1969,7 @@ func (c *Conn) finishUpload(rt requestRoundTripper, req *http.Request, onDone fu
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		c.uploadErr = fmt.Errorf("xhttp: upload path returned %s", resp.Status)
+		c.uploadErr = xhttpErrf("upload", "upload path returned %s", resp.Status)
 	}
 }
 
@@ -1983,7 +1987,7 @@ func (c *Conn) startStreamOne(rt requestRoundTripper, req *http.Request, onDone 
 		if onDone != nil {
 			onDone()
 		}
-		c.respCh <- responseResult{err: fmt.Errorf("xhttp: stream-one path returned %s", resp.Status)}
+		c.respCh <- responseResult{err: xhttpErrf("download", "stream-one path returned %s", resp.Status)}
 		return
 	}
 	c.respCh <- responseResult{body: wrapManagedReadCloser(resp.Body, onDone)}
@@ -2003,7 +2007,7 @@ func (c *Conn) startDownload(rt requestRoundTripper, req *http.Request, onDone f
 		if onDone != nil {
 			onDone()
 		}
-		c.respCh <- responseResult{err: fmt.Errorf("xhttp: download path returned %s", resp.Status)}
+		c.respCh <- responseResult{err: xhttpErrf("download", "download path returned %s", resp.Status)}
 		return
 	}
 	c.respCh <- responseResult{body: wrapManagedReadCloser(resp.Body, onDone)}

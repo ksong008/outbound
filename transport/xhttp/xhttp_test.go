@@ -184,6 +184,16 @@ func TestBuildXHTTPOptionsRejectsUnsupportedCombinations(t *testing.T) {
 	}
 }
 
+func TestBuildXHTTPOptionsErrorsAreTypedByStage(t *testing.T) {
+	_, err := buildXHTTPOptions("http", "none", "auto", "")
+	if err == nil {
+		t.Fatal("expected config error")
+	}
+	if !strings.Contains(err.Error(), "xhttp/config:") {
+		t.Fatalf("expected config-prefixed error, got %v", err)
+	}
+}
+
 func TestBuildDownloadEndpointRejectsRealityH3(t *testing.T) {
 	nextDialer := direct.NewDirectDialerLaddr(netip.Addr{}, direct.Option{})
 	_, err := buildDownloadEndpoint(
