@@ -203,6 +203,7 @@ type h2PoolEntry struct {
 	maxReuseTimes  int
 	leftRequests   int
 	unreusableAt   time.Time
+	lastUsed       time.Time
 }
 
 type h2Pool struct {
@@ -227,6 +228,7 @@ type rangedInt struct {
 }
 
 const charsetBase62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+const requestClientIdleTimeout = 2 * time.Minute
 const (
 	placementQueryInHeader = "queryinheader"
 	placementCookie        = "cookie"
@@ -612,6 +614,17 @@ func normalizedXPaddingRange(r rangedInt) rangedInt {
 	return r
 }
 
+func dialerIdentityKey(d netproxy.Dialer) string {
+	if d == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%T:%p", d, d)
+}
+
+func requestClientIdleExpired(lastUsed, now time.Time) bool {
+	return !lastUsed.IsZero() && now.Sub(lastUsed) > requestClientIdleTimeout
+}
+
 func randomStringFromCharset(n int, charset string) string {
 	if n <= 0 || len(charset) == 0 {
 		return ""
@@ -964,6 +977,7 @@ type h3ClientEntry struct {
 	leftUsage     int
 	leftRequests  int
 	unreusableAt  time.Time
+	lastUsed      time.Time
 }
 
 type h3ClientPool struct {
@@ -1041,8 +1055,10 @@ func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network str
 	}, nil
 }
 
-func requestClientPoolKey(ep endpoint, network string) string {
+func requestClientReuseKey(ep endpoint, network string) string {
 	return strings.Join([]string{
+		dialerIdentityKey(ep.nextDialer),
+		dialerIdentityKey(ep.dialer),
 		ep.addr,
 		ep.host,
 		ep.path,
@@ -1058,6 +1074,7 @@ func newH3ClientEntry(client *requestClient, opts xmuxOptions) *h3ClientEntry {
 		client:       client,
 		leftUsage:    -1,
 		leftRequests: math.MaxInt32,
+		lastUsed:     time.Now(),
 	}
 	if opts.maxReuseTimes > 0 {
 		entry.leftUsage = opts.maxReuseTimes - 1
@@ -1073,6 +1090,9 @@ func newH3ClientEntry(client *requestClient, opts xmuxOptions) *h3ClientEntry {
 
 func (e *h3ClientEntry) reusable(now time.Time) bool {
 	if e == nil || e.client == nil || e.client.IsClosed() {
+		return false
+	}
+	if e.active == 0 && requestClientIdleExpired(e.lastUsed, now) {
 		return false
 	}
 	if e.leftUsage == 0 {
@@ -1098,6 +1118,7 @@ func (p *h3ClientPool) release(key string, entry *h3ClientEntry) error {
 		if candidate.active > 0 {
 			candidate.active--
 		}
+		candidate.lastUsed = time.Now()
 		if candidate.active == 0 && !candidate.reusable(time.Now()) {
 			_ = candidate.client.Close()
 			p.entries[key] = append(entries[:i], entries[i+1:]...)
@@ -1123,7 +1144,7 @@ func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network 
 		}, nil
 	}
 
-	key := requestClientPoolKey(ep, network)
+	key := requestClientReuseKey(ep, network)
 	globalH3RequestPool.mu.Lock()
 	defer globalH3RequestPool.mu.Unlock()
 	now := time.Now()
@@ -1164,6 +1185,7 @@ func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network 
 		}
 		entry := newH3ClientEntry(client, opts)
 		entry.active = 1
+		entry.lastUsed = now
 		if entry.leftUsage > 0 {
 			entry.leftUsage--
 		}
@@ -1182,6 +1204,7 @@ func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network 
 	}
 	entry := eligible[0]
 	entry.active++
+	entry.lastUsed = now
 	if entry.leftUsage > 0 {
 		entry.leftUsage--
 	}
@@ -1198,8 +1221,17 @@ func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network 
 	}, nil
 }
 
-func endpointPoolKey(ep endpoint) string {
-	return ep.addr + "|" + ep.host + "|" + ep.path
+func packetUploadReuseKey(ep endpoint) string {
+	return strings.Join([]string{
+		dialerIdentityKey(ep.nextDialer),
+		dialerIdentityKey(ep.dialer),
+		ep.addr,
+		ep.host,
+		ep.path,
+		ep.serverName,
+		ep.security,
+		ep.alpn,
+	}, "|")
 }
 
 func (p *h2Pool) acquire(ctx context.Context, ep endpoint, opts xmuxOptions, opener func(context.Context, endpoint) (netproxy.Conn, *http2.ClientConn, error)) (*pooledH2Lease, error) {
@@ -1215,9 +1247,12 @@ func (p *h2Pool) acquire(ctx context.Context, ep endpoint, opts xmuxOptions, ope
 		}, nil
 	}
 
-	key := endpointPoolKey(ep)
+	key := packetUploadReuseKey(ep)
 	p.mu.Lock()
 	for _, entry := range p.entries[key] {
+		if entry.active == 0 && requestClientIdleExpired(entry.lastUsed, time.Now()) {
+			continue
+		}
 		if !entry.h2Conn.CanTakeNewRequest() {
 			continue
 		}
@@ -1235,6 +1270,7 @@ func (p *h2Pool) acquire(ctx context.Context, ep endpoint, opts xmuxOptions, ope
 		}
 		entry.active++
 		entry.reuseCount++
+		entry.lastUsed = time.Now()
 		if entry.leftRequests > 0 {
 			entry.leftRequests--
 		}
@@ -1268,6 +1304,7 @@ func (p *h2Pool) acquire(ctx context.Context, ep endpoint, opts xmuxOptions, ope
 		maxConcurrency: opts.maxConcurrency,
 		maxReuseTimes:  opts.maxReuseTimes,
 		leftRequests:   opts.hMaxRequestTimes,
+		lastUsed:       time.Now(),
 	}
 	if opts.hMaxReusableSecs > 0 {
 		entry.unreusableAt = time.Now().Add(time.Duration(opts.hMaxReusableSecs) * time.Second)
@@ -1286,6 +1323,7 @@ func (p *h2Pool) release(key string, entry *h2PoolEntry) error {
 	if entry.active > 0 {
 		entry.active--
 	}
+	entry.lastUsed = time.Now()
 	shouldClose := !entry.h2Conn.CanTakeNewRequest() || (entry.maxReuseTimes > 0 && entry.reuseCount >= entry.maxReuseTimes && entry.active == 0)
 	if shouldClose && entry.active == 0 {
 		entries := p.entries[key]

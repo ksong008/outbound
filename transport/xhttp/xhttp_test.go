@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"io"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
@@ -243,6 +244,54 @@ func TestShouldUseH3(t *testing.T) {
 		if got := shouldUseH3(tt.alpn); got != tt.want {
 			t.Fatalf("shouldUseH3(%q) = %v, want %v", tt.alpn, got, tt.want)
 		}
+	}
+}
+
+func TestRequestClientReuseKeySeparatesDialers(t *testing.T) {
+	dialerA := direct.NewDirectDialerLaddr(netip.Addr{}, direct.Option{})
+	dialerB := direct.NewDirectDialerLaddr(netip.MustParseAddr("127.0.0.2"), direct.Option{})
+	epBase := endpoint{
+		addr:       "example.com:443",
+		host:       "example.com",
+		path:       "/xhttp",
+		serverName: "example.com",
+		security:   "tls",
+		alpn:       "h2",
+	}
+	keyA := requestClientReuseKey(endpoint{
+		nextDialer: dialerA,
+		dialer:     dialerA,
+		addr:       epBase.addr,
+		host:       epBase.host,
+		path:       epBase.path,
+		serverName: epBase.serverName,
+		security:   epBase.security,
+		alpn:       epBase.alpn,
+	}, "tcp")
+	keyB := requestClientReuseKey(endpoint{
+		nextDialer: dialerB,
+		dialer:     dialerB,
+		addr:       epBase.addr,
+		host:       epBase.host,
+		path:       epBase.path,
+		serverName: epBase.serverName,
+		security:   epBase.security,
+		alpn:       epBase.alpn,
+	}, "tcp")
+	if keyA == keyB {
+		t.Fatal("expected reuse key to distinguish dialer identity")
+	}
+}
+
+func TestH3ClientEntryReusableExpiresWhenIdle(t *testing.T) {
+	entry := &h3ClientEntry{
+		client:       &requestClient{},
+		leftUsage:    -1,
+		leftRequests: math.MaxInt32,
+		lastUsed:     time.Now().Add(-requestClientIdleTimeout - time.Second),
+	}
+	if entry.reusable(time.Now()) {
+		t.Fatal("expected idle h3 entry to be non-reusable")
 	}
 }
 
