@@ -183,6 +183,49 @@ func TestBuildXHTTPOptionsRejectsUnsupportedCombinations(t *testing.T) {
 	}
 }
 
+func TestBuildDownloadEndpointRejectsRealityH3(t *testing.T) {
+	nextDialer := direct.NewDirectDialerLaddr(netip.Addr{}, direct.Option{})
+	_, err := buildDownloadEndpoint(
+		&dialer.ExtraOption{},
+		nextDialer,
+		"example.com:443",
+		"example.com",
+		"/download",
+		"example.com",
+		false,
+		"h2",
+		"",
+		"public-key",
+		"short-id",
+		"/",
+		&downloadSettingsConfig{
+			Address:  "example.com",
+			Port:     443,
+			Network:  "xhttp",
+			Security: "reality",
+			TLSSettings: tlsSettingsConfig{
+				ALPN: []string{"h3"},
+			},
+			RealitySettings: realitySettingsConfig{
+				ServerName:  "example.com",
+				Fingerprint: "chrome",
+				PublicKey:   "public-key",
+				ShortID:     "short-id",
+			},
+			XHTTPSettings: xhttpSettingsConfig{
+				Host: "example.com",
+				Path: "/download",
+			},
+		},
+	)
+	if err == nil {
+		t.Fatal("expected reality+h3 download endpoint to be rejected")
+	}
+	if !strings.Contains(err.Error(), "reality with h3 is not supported") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestShouldUseH3(t *testing.T) {
 	tests := []struct {
 		alpn string
@@ -1090,5 +1133,96 @@ func TestStreamUpSupportsSequentialHTTPRequests(t *testing.T) {
 	}
 	if string(buf) != expected {
 		t.Fatalf("unexpected payload: got %q want %q", string(buf), expected)
+	}
+}
+
+func TestPacketUpH2Integration(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		sessions = make(map[string]*h3Session)
+	)
+	getSession := func(key string) *h3Session {
+		key = path.Base(key)
+		mu.Lock()
+		defer mu.Unlock()
+		if sess, ok := sessions[key]; ok {
+			return sess
+		}
+		pr, pw := io.Pipe()
+		sess := &h3Session{reader: pr, writer: pw}
+		sessions[key] = sess
+		return sess
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sess := getSession(r.URL.Path)
+		switch r.Method {
+		case http.MethodGet:
+			flusher, _ := w.(http.Flusher)
+			w.WriteHeader(http.StatusOK)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			buf := make([]byte, 32*1024)
+			for {
+				n, err := sess.reader.Read(buf)
+				if n > 0 {
+					if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+						return
+					}
+					if flusher != nil {
+						flusher.Flush()
+					}
+				}
+				if err != nil {
+					return
+				}
+			}
+		case http.MethodPost:
+			if _, err := io.Copy(sess.writer, r.Body); err != nil {
+				t.Logf("packet-up copy error: %v", err)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	server := httptest.NewUnstartedServer(handler)
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+
+	link := "https://" + serverURL.Host + "/echo?host=" + serverURL.Hostname() + "&sni=" + serverURL.Hostname() + "&allowInsecure=true&alpn=h2&mode=packet-up"
+	nextDialer := direct.NewDirectDialerLaddr(netip.Addr{}, direct.Option{})
+	xDialer, err := NewDialer(&dialer.ExtraOption{}, nextDialer, link)
+	if err != nil {
+		t.Fatalf("new dialer: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := xDialer.DialContext(ctx, "tcp", serverURL.Host)
+	if err != nil {
+		t.Fatalf("dial context: %v", err)
+	}
+	defer conn.Close()
+
+	payload := []byte("hello over h2 packet-up")
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	buf := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read payload: %v", err)
+	}
+	if string(buf) != string(payload) {
+		t.Fatalf("unexpected echo: got %q want %q", string(buf), string(payload))
 	}
 }
