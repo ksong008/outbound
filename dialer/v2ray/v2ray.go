@@ -2,6 +2,7 @@ package v2ray
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -22,6 +23,32 @@ import (
 	"github.com/daeuniverse/outbound/transport/xhttp"
 	jsoniter "github.com/json-iterator/go"
 )
+
+func canonicalXHTTPMode(mode string) string {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	switch mode {
+	case "", "auto", "stream-up", "stream-one", "packet-up":
+		return mode
+	default:
+		return mode
+	}
+}
+
+func canonicalXHTTPExtra(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return raw
+	}
+	encoded, err := json.Marshal(parsed)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
+}
 
 func init() {
 	dialer.FromLinkRegister("vmess", NewV2Ray)
@@ -443,8 +470,12 @@ func (s *V2Ray) ExportToURL() string {
 			common.SetValue(&query, "path", s.Path)
 			common.SetValue(&query, "host", s.Host)
 			if s.Net == "xhttp" {
-				common.SetValue(&query, "mode", s.XHTTPMode)
-				common.SetValue(&query, "extra", s.XHTTPExtra)
+				if mode := canonicalXHTTPMode(s.XHTTPMode); mode != "" && mode != "auto" {
+					common.SetValue(&query, "mode", mode)
+				}
+				if extra := canonicalXHTTPExtra(s.XHTTPExtra); extra != "" && extra != "{}" {
+					common.SetValue(&query, "extra", extra)
+				}
 			}
 		case "mkcp", "kcp":
 			common.SetValue(&query, "headerType", s.Type)

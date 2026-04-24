@@ -101,14 +101,35 @@ func TestExportVlessURLXHTTP(t *testing.T) {
 	if !strings.Contains(exported, "type=xhttp") {
 		t.Fatalf("expected exported URL to contain type=xhttp, got %q", exported)
 	}
-	if !strings.Contains(exported, "mode=auto") {
-		t.Fatalf("expected exported URL to contain mode=auto, got %q", exported)
+	if strings.Contains(exported, "mode=auto") {
+		t.Fatalf("expected exported URL to omit default auto mode, got %q", exported)
 	}
 	if !strings.Contains(exported, "extra=seed") {
 		t.Fatalf("expected exported URL to contain extra=seed, got %q", exported)
 	}
 	if !strings.Contains(exported, "allowInsecure=1") {
 		t.Fatalf("expected exported URL to contain allowInsecure=1, got %q", exported)
+	}
+}
+
+func TestExportVlessURLXHTTPCanonicalExtra(t *testing.T) {
+	cfg := &V2Ray{
+		Ps:         "xhttp",
+		Add:        "example.com",
+		Port:       "443",
+		ID:         "uuid",
+		Net:        "xhttp",
+		Host:       "example.com",
+		Path:       "/x",
+		TLS:        "tls",
+		SNI:        "sni.example.com",
+		XHTTPExtra: "{\n  \"b\":2,\n  \"a\":1\n}",
+		Protocol:   "vless",
+	}
+
+	exported := cfg.ExportToURL()
+	if !strings.Contains(exported, "extra=%7B%22a%22%3A1%2C%22b%22%3A2%7D") {
+		t.Fatalf("expected canonicalized extra JSON, got %q", exported)
 	}
 }
 
