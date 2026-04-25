@@ -3,6 +3,7 @@ package vless
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
@@ -36,7 +37,11 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	if err != nil {
 		return nil, err
 	}
-	flow := header.Feature1
+	flow, _ := header.Feature1.(string)
+	flow = strings.TrimSpace(flow)
+	if strings.EqualFold(flow, "none") {
+		flow = ""
+	}
 	switch flow {
 	case XRV:
 		if !metadata.IsClient {
@@ -50,7 +55,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		proxyAddress: header.ProxyAddress,
 		nextDialer:   nextDialer,
 		metadata:     metadata,
-		flow:         flow.(string),
+		flow:         flow,
 		// xudp:         header.Flags&protocol.Flags_VMess_UsePacketAddr == 0,
 		xudp: true && flow == XRV,
 		key:  id,

@@ -31,6 +31,29 @@ func TestNewDialerAcceptsVisionFlow(t *testing.T) {
 	}
 }
 
+func TestNewDialerTreatsNoneFlowAsEmpty(t *testing.T) {
+	d, err := NewDialer(direct.SymmetricDirect, protocol.Header{
+		ProxyAddress: "example.com:443",
+		Password:     "00000000-0000-0000-0000-000000000000",
+		IsClient:     true,
+		Feature1:     "none",
+	})
+	if err != nil {
+		t.Fatalf("NewDialer returned error: %v", err)
+	}
+
+	typed, ok := d.(*Dialer)
+	if !ok {
+		t.Fatalf("expected *Dialer, got %T", d)
+	}
+	if typed.flow != "" {
+		t.Fatalf("expected flow none to be treated as empty, got %q", typed.flow)
+	}
+	if typed.xudp {
+		t.Fatal("expected xudp to stay disabled without vision flow")
+	}
+}
+
 func TestNewDialerRejectsVisionFlowForServerMode(t *testing.T) {
 	_, err := NewDialer(direct.SymmetricDirect, protocol.Header{
 		ProxyAddress: "example.com:443",

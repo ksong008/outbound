@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	outbounddialer "github.com/daeuniverse/outbound/dialer"
+	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/daeuniverse/outbound/protocol/vless"
 )
 
@@ -57,6 +59,48 @@ func TestExportVlessURLVisionFlow(t *testing.T) {
 	}
 }
 
+func TestParseVlessURLTreatsNoneFlowAsEmpty(t *testing.T) {
+	cfg, err := ParseVlessURL("vless://7c12c745-63a5-433d-9e60-022e469b5bd4@156.246.90.2:18447?type=xhttp&security=tls&host=office.mitsuha.me&headerType=none&sni=office.mitsuha.me&flow=none&allowInsecure=false&path=%2Fxhttp&mode=packet-up&alpn=h3&fp=chrome#xhttp-h3-packet-up-18447")
+	if err != nil {
+		t.Fatalf("ParseVlessURL returned error: %v", err)
+	}
+	if cfg.Flow != "" {
+		t.Fatalf("expected flow none to be treated as empty, got %q", cfg.Flow)
+	}
+}
+
+func TestNewV2RayAcceptsNoneFlow(t *testing.T) {
+	link := "vless://7c12c745-63a5-433d-9e60-022e469b5bd4@156.246.90.2:18447?type=xhttp&security=tls&host=office.mitsuha.me&headerType=none&sni=office.mitsuha.me&flow=none&allowInsecure=false&path=%2Fxhttp&mode=packet-up&alpn=h3&fp=chrome#xhttp-h3-packet-up-18447"
+	_, property, err := NewV2Ray(&outbounddialer.ExtraOption{}, direct.SymmetricDirect, link)
+	if err != nil {
+		t.Fatalf("NewV2Ray returned error: %v", err)
+	}
+	if strings.Contains(property.Link, "flow=none") || strings.Contains(property.Link, "flow=") {
+		t.Fatalf("expected exported property link to omit placeholder flow, got %q", property.Link)
+	}
+}
+
+func TestExportVlessURLOmitsNoneFlow(t *testing.T) {
+	cfg := &V2Ray{
+		Ps:       "node",
+		Add:      "example.com",
+		Port:     "443",
+		ID:       "uuid",
+		Net:      "xhttp",
+		Host:     "example.com",
+		Path:     "/xhttp",
+		TLS:      "tls",
+		SNI:      "server.example",
+		Flow:     "none",
+		Protocol: "vless",
+	}
+
+	exported := cfg.ExportToURL()
+	if strings.Contains(exported, "flow=none") || strings.Contains(exported, "flow=") {
+		t.Fatalf("expected exported URL to omit placeholder flow, got %q", exported)
+	}
+}
+
 func TestParseVlessURLXHTTP(t *testing.T) {
 	cfg, err := ParseVlessURL("vless://uuid@example.com:443?type=xhttp&security=tls&host=example.com&path=%2Fx&mode=auto&extra=seed&sni=sni.example.com&alpn=h2%2Chttp%2F1.1&allowInsecure=1#xhttp")
 	if err != nil {
@@ -81,20 +125,20 @@ func TestParseVlessURLXHTTP(t *testing.T) {
 
 func TestExportVlessURLXHTTP(t *testing.T) {
 	cfg := &V2Ray{
-		Ps:         "xhttp",
-		Add:        "example.com",
-		Port:       "443",
-		ID:         "uuid",
-		Net:        "xhttp",
-		Host:       "example.com",
-		Path:       "/x",
-		TLS:        "tls",
-		SNI:        "sni.example.com",
-		Alpn:       "h2,http/1.1",
+		Ps:            "xhttp",
+		Add:           "example.com",
+		Port:          "443",
+		ID:            "uuid",
+		Net:           "xhttp",
+		Host:          "example.com",
+		Path:          "/x",
+		TLS:           "tls",
+		SNI:           "sni.example.com",
+		Alpn:          "h2,http/1.1",
 		AllowInsecure: true,
-		XHTTPMode:  "auto",
-		XHTTPExtra: "seed",
-		Protocol:   "vless",
+		XHTTPMode:     "auto",
+		XHTTPExtra:    "seed",
+		Protocol:      "vless",
 	}
 
 	exported := cfg.ExportToURL()

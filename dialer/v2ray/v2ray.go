@@ -50,6 +50,14 @@ func canonicalXHTTPExtra(raw string) string {
 	return string(encoded)
 }
 
+func canonicalVlessFlow(flow string) string {
+	flow = strings.TrimSpace(flow)
+	if strings.EqualFold(flow, "none") {
+		return ""
+	}
+	return flow
+}
+
 func init() {
 	dialer.FromLinkRegister("vmess", NewV2Ray)
 	dialer.FromLinkRegister("vless", NewV2Ray)
@@ -317,7 +325,7 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 		Cipher:       getAutoCipher(),
 		Password:     s.ID,
 		IsClient:     true,
-		Feature1:     s.Flow,
+		Feature1:     canonicalVlessFlow(s.Flow),
 		//Flags:        protocol.Flags_VMess_UsePacketAddr,
 	}); err != nil {
 		return nil, nil, err
@@ -348,7 +356,7 @@ func ParseVlessURL(vless string) (data *V2Ray, err error) {
 		XHTTPMode:     u.Query().Get("mode"),
 		XHTTPExtra:    u.Query().Get("extra"),
 		TLS:           u.Query().Get("security"),
-		Flow:          u.Query().Get("flow"),
+		Flow:          canonicalVlessFlow(u.Query().Get("flow")),
 		Alpn:          u.Query().Get("alpn"),
 		AllowInsecure: u.Query().Get("allowInsecure") == "1" || strings.EqualFold(u.Query().Get("allowInsecure"), "true"),
 		Fingerprint:   u.Query().Get("fp"),
@@ -494,7 +502,7 @@ func (s *V2Ray) ExportToURL() string {
 		if s.TLS != "none" {
 			common.SetValue(&query, "sni", s.SNI)
 			common.SetValue(&query, "alpn", s.Alpn)
-			common.SetValue(&query, "flow", s.Flow)
+			common.SetValue(&query, "flow", canonicalVlessFlow(s.Flow))
 			common.SetValue(&query, "fp", s.Fingerprint)
 			common.SetValue(&query, "allowInsecure", common.BoolToString(s.AllowInsecure))
 			if s.TLS == "reality" {
