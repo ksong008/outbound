@@ -23,10 +23,10 @@ import (
 )
 
 const (
-	TCPChunkMaxLen        = (1 << 16) - 1
+	TCPChunkMaxLen         = (1 << 16) - 1
 	HeaderTypeClientStream = 0
 	HeaderTypeServerStream = 1
-	MaxPaddingLength      = 900
+	MaxPaddingLength       = 900
 )
 
 type TCPConn struct {
@@ -51,7 +51,7 @@ type TCPConn struct {
 	indexToRead int
 
 	requestSalt []byte
-	bloom *disk_bloom.FilterGroup
+	bloom       *disk_bloom.FilterGroup
 }
 
 func NewTCPConn(
@@ -62,7 +62,7 @@ func NewTCPConn(
 	sg shadowsocks.SaltGenerator,
 	addr *socks5.AddressInfo,
 	bloom *disk_bloom.FilterGroup,
-	) netproxy.Conn {
+) netproxy.Conn {
 	return &TCPConn{
 		Conn:       conn,
 		addr:       addr,
@@ -139,7 +139,7 @@ func (c *TCPConn) Read(b []byte) (int, error) {
 		if typ != HeaderTypeServerStream {
 			return 0, fmt.Errorf("received unexpected header type: %d", typ)
 		}
-		if timestamp.Before(time.Now().Add(-ciphers.TimestampTolerance)) {
+		if timestampOutOfTolerance(timestamp, time.Now()) {
 			return 0, protocol.ErrReplayAttack
 		}
 		requestSalt := header[offset : offset+c.cipherConf.SaltLen]

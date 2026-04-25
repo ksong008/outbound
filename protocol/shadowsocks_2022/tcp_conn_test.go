@@ -8,6 +8,7 @@ import (
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/pool"
+	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/socks5"
 )
 
@@ -88,12 +89,12 @@ func TestTCPConnInitialReadUsesSingleReadForSaltAndFixedHeader(t *testing.T) {
 	fixedHeader = append(fixedHeader, ts...)
 	fixedHeader = append(fixedHeader, requestSalt...)
 	length := make([]byte, 2)
-	binary.BigEndian.PutUint16(length, 0)
+	binary.BigEndian.PutUint16(length, 1)
 	fixedHeader = append(fixedHeader, length...)
 	encryptedFixed := aead.Seal(nil, nonce0, fixedHeader, nil)
 
 	nonce1 := incrementNonce(nonce0)
-	encryptedPayload := aead.Seal(nil, nonce1, nil, nil)
+	encryptedPayload := aead.Seal(nil, nonce1, []byte{0x42}, nil)
 
 	wire := append([]byte{}, responseSalt...)
 	wire = append(wire, encryptedFixed...)
@@ -109,8 +110,8 @@ func TestTCPConnInitialReadUsesSingleReadForSaltAndFixedHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 0 {
-		t.Fatalf("expected empty payload, got %d bytes", n)
+	if n != 1 || buf[0] != 0x42 {
+		t.Fatalf("unexpected payload: n=%d first=%#x", n, buf[0])
 	}
 	if conn.readCalls != 2 {
 		t.Fatalf("expected 2 underlying reads, got %d", conn.readCalls)
@@ -159,6 +160,51 @@ func TestTCPConnRejectsZeroLengthFirstResponsePayload(t *testing.T) {
 	buf := make([]byte, 16)
 	if _, err := tcpConn.Read(buf); err == nil {
 		t.Fatal("expected zero-length first response payload to be rejected")
+	}
+}
+
+func TestTCPConnRejectsFutureTimestamp(t *testing.T) {
+	conf := ciphers.Aead2022CiphersConf["2022-blake3-aes-128-gcm"]
+	if conf == nil {
+		t.Fatal("missing test cipher config")
+	}
+	uPSK, err := ciphers.ValidateBase64PSK(testSS2022PSK128, conf.KeyLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	responseSalt := make([]byte, conf.SaltLen)
+	copy(responseSalt, []byte("1234567890123456"))
+	requestSalt := make([]byte, conf.SaltLen)
+	copy(requestSalt, []byte("abcdefghijklmnop"))
+
+	aead, err := CreateCipher(uPSK, responseSalt, conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce0 := make([]byte, conf.NonceLen)
+	fixedHeader := make([]byte, 0, 11+conf.SaltLen)
+	fixedHeader = append(fixedHeader, HeaderTypeServerStream)
+	ts := make([]byte, 8)
+	binary.BigEndian.PutUint64(ts, uint64(time.Now().Add(2*ciphers.TimestampTolerance).Unix()))
+	fixedHeader = append(fixedHeader, ts...)
+	fixedHeader = append(fixedHeader, requestSalt...)
+	length := make([]byte, 2)
+	binary.BigEndian.PutUint16(length, 1)
+	fixedHeader = append(fixedHeader, length...)
+	encryptedFixed := aead.Seal(nil, nonce0, fixedHeader, nil)
+
+	wire := append([]byte{}, responseSalt...)
+	wire = append(wire, encryptedFixed...)
+
+	conn := &readCounterConn{Reader: bytes.NewReader(wire)}
+	tcpConn := NewTCPConn(conn, conf, [][]byte{uPSK}, uPSK, nil, nil, nil).(*TCPConn)
+	tcpConn.requestSalt = requestSalt
+	tcpConn.onceWrite = true
+
+	buf := make([]byte, 16)
+	if _, err := tcpConn.Read(buf); err != protocol.ErrReplayAttack {
+		t.Fatalf("expected replay attack error, got %v", err)
 	}
 }
 

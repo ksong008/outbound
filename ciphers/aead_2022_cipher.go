@@ -6,15 +6,19 @@ import (
 	"encoding/base64"
 	"fmt"
 	"time"
+
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 type CipherConf2022 struct {
-	KeyLen         int
-	SaltLen        int
-	NonceLen       int
-	TagLen         int
-	NewCipher      func(key []byte) (cipher.AEAD, error)
-	NewBlockCipher func(key []byte) (cipher.Block, error)
+	KeyLen          int
+	SaltLen         int
+	NonceLen        int
+	TagLen          int
+	NewCipher       func(key []byte) (cipher.AEAD, error)
+	NewBlockCipher  func(key []byte) (cipher.Block, error)
+	NewPacketCipher func(key []byte) (cipher.AEAD, error)
+	PacketNonceLen  int
 }
 
 const (
@@ -38,6 +42,16 @@ var (
 			TagLen:         16,
 			NewCipher:      NewGcm,
 			NewBlockCipher: aes.NewCipher,
+		},
+		"2022-blake3-chacha20-poly1305": {
+			KeyLen:          chacha20poly1305.KeySize,
+			SaltLen:         chacha20poly1305.KeySize,
+			NonceLen:        chacha20poly1305.NonceSize,
+			TagLen:          chacha20poly1305.Overhead,
+			NewCipher:       chacha20poly1305.New,
+			NewBlockCipher:  aes.NewCipher,
+			NewPacketCipher: chacha20poly1305.NewX,
+			PacketNonceLen:  chacha20poly1305.NonceSizeX,
 		},
 	}
 )

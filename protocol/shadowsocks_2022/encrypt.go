@@ -2,6 +2,7 @@ package shadowsocks_2022
 
 import (
 	"crypto/cipher"
+	"time"
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/pool"
@@ -27,4 +28,8 @@ func CreateCipher(masterKey []byte, salt []byte, cipherConf *ciphers.CipherConf2
 	subKey := GenerateSubKey(masterKey, salt, Shadowsocks2022ReusedInfo)
 	defer pool.Put(subKey)
 	return cipherConf.NewCipher(subKey)
+}
+
+func timestampOutOfTolerance(timestamp time.Time, now time.Time) bool {
+	return timestamp.Before(now.Add(-ciphers.TimestampTolerance)) || timestamp.After(now.Add(ciphers.TimestampTolerance))
 }

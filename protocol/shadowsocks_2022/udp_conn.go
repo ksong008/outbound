@@ -34,11 +34,13 @@ type UdpConn struct {
 	cipherConf         *ciphers.CipherConf2022
 	blockCipherEncrypt cipher.Block
 	blockCipherDecrypt cipher.Block
+	packetCipher       cipher.AEAD
 
 	pskList [][]byte
 	uPSK    []byte
 	bloom   *disk_bloom.FilterGroup
 
+	writeMu        sync.Mutex
 	sessionMu      sync.Mutex
 	serverSessions map[[8]byte]*serverSessionState
 }
@@ -49,10 +51,11 @@ type serverSessionState struct {
 }
 
 const (
-	HeaderTypeClientPacket   = 0
-	HeaderTypeServerPacket   = 1
-	UDPReplayWindowSize      = 4096
-	ServerSessionRetention   = 60 * time.Second
+	HeaderTypeClientPacket = 0
+	HeaderTypeServerPacket = 1
+	UDPReplayWindowSize    = 4096
+	ServerSessionRetention = 60 * time.Second
+	UDPMaxPacketSize       = 64 * 1024
 )
 
 func NewUdpConn(
@@ -75,6 +78,13 @@ func NewUdpConn(
 		uPSK:               uPSK,
 		bloom:              bloom,
 		serverSessions:     make(map[[8]byte]*serverSessionState),
+	}
+	if conf.NewPacketCipher != nil {
+		packetCipher, err := conf.NewPacketCipher(uPSK)
+		if err != nil {
+			return nil, err
+		}
+		u.packetCipher = packetCipher
 	}
 	fastrand.Read(u.sessionID[:])
 	return u, nil
@@ -107,15 +117,26 @@ func (c *UdpConn) writeIdentityHeader(buf *poolBytes.Buffer, separateHeader []by
 }
 
 func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	if c.packetCipher != nil {
+		return c.writeToMergedHeader(b, addr)
+	}
+	return c.writeToSeparateHeader(b, addr)
+}
+
+func (c *UdpConn) writeToSeparateHeader(b []byte, addr string) (int, error) {
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
 
 	separateHeader := pool.GetBuffer()
 	defer pool.PutBuffer(separateHeader)
 
+	packetID := c.packetID
 	c.packetID++
 	separateHeader.Write(c.sessionID[:])
-	if err := binary.Write(separateHeader, binary.BigEndian, c.packetID); err != nil {
+	if err := binary.Write(separateHeader, binary.BigEndian, packetID); err != nil {
 		return 0, err
 	}
 
@@ -145,6 +166,30 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	return len(b), err
 }
 
+func (c *UdpConn) writeToMergedHeader(b []byte, addr string) (int, error) {
+	buf := pool.GetBuffer()
+	defer pool.PutBuffer(buf)
+
+	packetID := c.packetID
+	c.packetID++
+
+	message, err := EncodeMergedPacketMessage(HeaderTypeClientPacket, uint64(time.Now().Unix()), c.sessionID, packetID, addr, b)
+	if err != nil {
+		return 0, fmt.Errorf("fail to encode message: %w", err)
+	}
+	defer pool.PutBuffer(message)
+
+	nonce := pool.Get(c.cipherConf.PacketNonceLen)
+	defer pool.Put(nonce)
+	fastrand.Read(nonce)
+
+	buf.Write(nonce)
+	buf.Write(c.packetCipher.Seal(nil, nonce, message.Bytes(), nil))
+
+	_, err = c.Conn.Write(buf.Bytes())
+	return len(b), err
+}
+
 func EncodeMessage(typ uint8, timestamp uint64, address string, b []byte) (*poolBytes.Buffer, error) {
 	message := pool.GetBuffer()
 	message.WriteByte(typ)
@@ -169,34 +214,85 @@ func EncodeMessage(typ uint8, timestamp uint64, address string, b []byte) (*pool
 	return message, nil
 }
 
+func EncodeMergedPacketMessage(typ uint8, timestamp uint64, sessionID [8]byte, packetID uint64, address string, b []byte) (*poolBytes.Buffer, error) {
+	message := pool.GetBuffer()
+	message.Write(sessionID[:])
+	if err := binary.Write(message, binary.BigEndian, packetID); err != nil {
+		pool.PutBuffer(message)
+		return nil, err
+	}
+	message.WriteByte(typ)
+	if err := binary.Write(message, binary.BigEndian, timestamp); err != nil {
+		pool.PutBuffer(message)
+		return nil, err
+	}
+	if err := binary.Write(message, binary.BigEndian, uint16(0)); err != nil {
+		pool.PutBuffer(message)
+		return nil, err
+	}
+	addrInfo, err := socks5.AddressFromString(address)
+	if err != nil {
+		pool.PutBuffer(message)
+		return nil, err
+	}
+	if err := socks5.WriteAddrInfo(addrInfo, message); err != nil {
+		pool.PutBuffer(message)
+		return nil, err
+	}
+	message.Write(b)
+	return message, nil
+}
+
 func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
-	buf := pool.Get(len(b) + aes.BlockSize + c.cipherConf.TagLen + 64)
+	buf := pool.Get(UDPMaxPacketSize)
 	defer pool.Put(buf)
 
 	n, err = c.Conn.Read(buf)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	if n < aes.BlockSize {
-		return 0, netip.AddrPort{}, fmt.Errorf("short length to decrypt")
-	}
 
-	c.blockCipherDecrypt.Decrypt(buf[:aes.BlockSize], buf[:aes.BlockSize])
 	var serverSessionID [8]byte
-	copy(serverSessionID[:], buf[:8])
-	packetID := binary.BigEndian.Uint64(buf[8:16])
-	payload := buf[aes.BlockSize:n]
+	var packetID uint64
+	var reader *bytes.Reader
 
-	aead, err := CreateCipher(c.uPSK, buf[:8], c.cipherConf)
-	if err != nil {
-		return 0, netip.AddrPort{}, err
-	}
-	payload, err = aead.Open(payload[:0], buf[4:16], payload, nil)
-	if err != nil {
-		return 0, netip.AddrPort{}, err
-	}
+	if c.packetCipher != nil {
+		if n < c.cipherConf.PacketNonceLen+c.cipherConf.TagLen {
+			return 0, netip.AddrPort{}, fmt.Errorf("short length to decrypt")
+		}
+		nonce := buf[:c.cipherConf.PacketNonceLen]
+		payload := buf[c.cipherConf.PacketNonceLen:n]
+		payload, err = c.packetCipher.Open(payload[:0], nonce, payload, nil)
+		if err != nil {
+			return 0, netip.AddrPort{}, err
+		}
+		reader = bytes.NewReader(payload)
+		if _, err := io.ReadFull(reader, serverSessionID[:]); err != nil {
+			return 0, netip.AddrPort{}, fmt.Errorf("failed to read server session ID: %w", err)
+		}
+		if err := binary.Read(reader, binary.BigEndian, &packetID); err != nil {
+			return 0, netip.AddrPort{}, fmt.Errorf("failed to read packet ID: %w", err)
+		}
+	} else {
+		if n < aes.BlockSize {
+			return 0, netip.AddrPort{}, fmt.Errorf("short length to decrypt")
+		}
 
-	reader := bytes.NewReader(payload)
+		c.blockCipherDecrypt.Decrypt(buf[:aes.BlockSize], buf[:aes.BlockSize])
+		copy(serverSessionID[:], buf[:8])
+		packetID = binary.BigEndian.Uint64(buf[8:16])
+		payload := buf[aes.BlockSize:n]
+
+		aead, err := CreateCipher(c.uPSK, buf[:8], c.cipherConf)
+		if err != nil {
+			return 0, netip.AddrPort{}, err
+		}
+		payload, err = aead.Open(payload[:0], buf[4:16], payload, nil)
+		if err != nil {
+			return 0, netip.AddrPort{}, err
+		}
+		reader = bytes.NewReader(payload)
+	}
 
 	var typ uint8
 	if err := binary.Read(reader, binary.BigEndian, &typ); err != nil {
@@ -210,7 +306,7 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 	if typ != HeaderTypeServerPacket {
 		return 0, netip.AddrPort{}, fmt.Errorf("received unexpected header type: %d", typ)
 	}
-	if timestamp.Before(time.Now().Add(-ciphers.TimestampTolerance)) {
+	if timestampOutOfTolerance(timestamp, time.Now()) {
 		return 0, netip.AddrPort{}, protocol.ErrReplayAttack
 	}
 
