@@ -40,11 +40,14 @@ func TestNormalizeMode(t *testing.T) {
 		name    string
 		mode    string
 		scheme  string
+		alpn    string
 		want    string
 		wantErr bool
 	}{
 		{name: "auto over https", mode: "auto", scheme: "https", want: "packet-up"},
 		{name: "empty over https", mode: "", scheme: "https", want: "packet-up"},
+		{name: "auto over h3", mode: "auto", scheme: "https", alpn: "h3", want: "stream-up"},
+		{name: "empty over h3", mode: "", scheme: "https", alpn: "h3", want: "stream-up"},
 		{name: "stream-up", mode: "stream-up", scheme: "https", want: "stream-up"},
 		{name: "stream-one over https", mode: "stream-one", scheme: "https", want: "stream-one"},
 		{name: "packet-up over https", mode: "packet-up", scheme: "https", want: "packet-up"},
@@ -68,7 +71,7 @@ func TestNormalizeMode(t *testing.T) {
 			if strings.Contains(tt.name, "with download") {
 				hasDownload = true
 			}
-			got, err := normalizeMode(tt.mode, tt.scheme, security, hasDownload)
+			got, err := normalizeMode(tt.mode, tt.scheme, security, tt.alpn, hasDownload)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got mode %q", got)
@@ -111,7 +114,7 @@ func TestParseExtraInvalidJSON(t *testing.T) {
 }
 
 func TestBuildXHTTPOptions(t *testing.T) {
-	opts, err := buildXHTTPOptions("https", "tls", "auto", `{"headers":{"User-Agent":"xray"},"noGRPCHeader":true,"scMaxEachPostBytes":"16-32","scMinPostsIntervalMs":25,"sessionPlacement":"header"}`)
+	opts, err := buildXHTTPOptions("https", "tls", "h2", "auto", `{"headers":{"User-Agent":"xray"},"noGRPCHeader":true,"scMaxEachPostBytes":"16-32","scMinPostsIntervalMs":25,"sessionPlacement":"header"}`)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -136,7 +139,7 @@ func TestBuildXHTTPOptions(t *testing.T) {
 }
 
 func TestBuildXHTTPOptionsPacketUpDefaults(t *testing.T) {
-	opts, err := buildXHTTPOptions("https", "tls", "packet-up", "")
+	opts, err := buildXHTTPOptions("https", "tls", "h2", "packet-up", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -145,6 +148,19 @@ func TestBuildXHTTPOptionsPacketUpDefaults(t *testing.T) {
 	}
 	if opts.PacketMinGap != defaultPacketMinGap {
 		t.Fatalf("expected default packet min gap %v, got %v", defaultPacketMinGap, opts.PacketMinGap)
+	}
+}
+
+func TestBuildXHTTPOptionsH3AutoUsesStreamUp(t *testing.T) {
+	opts, err := buildXHTTPOptions("https", "tls", "h3", "auto", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.Mode != "stream-up" {
+		t.Fatalf("expected h3 auto to use stream-up, got %q", opts.Mode)
+	}
+	if opts.PacketMaxBytes != 0 {
+		t.Fatalf("expected stream-up to leave packet max bytes unset, got %d", opts.PacketMaxBytes)
 	}
 }
 
@@ -183,7 +199,7 @@ func TestBuildXHTTPOptionsRejectsUnsupportedCombinations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := buildXHTTPOptions("https", "tls", tt.mode, tt.extra)
+			_, err := buildXHTTPOptions("https", "tls", "h2", tt.mode, tt.extra)
 			if err == nil {
 				t.Fatalf("expected error containing %q", tt.want)
 			}
@@ -195,7 +211,7 @@ func TestBuildXHTTPOptionsRejectsUnsupportedCombinations(t *testing.T) {
 }
 
 func TestBuildXHTTPOptionsErrorsAreTypedByStage(t *testing.T) {
-	_, err := buildXHTTPOptions("http", "none", "auto", "")
+	_, err := buildXHTTPOptions("http", "none", "h2", "auto", "")
 	if err == nil {
 		t.Fatal("expected config error")
 	}
@@ -254,8 +270,10 @@ func TestShouldUseH3(t *testing.T) {
 	}{
 		{alpn: "h3", want: true},
 		{alpn: "H3", want: true},
+		{alpn: "h3-29", want: true},
 		{alpn: "h2,h3", want: false},
-		{alpn: "h3,http/1.1", want: false},
+		{alpn: "h3,http/1.1", want: true},
+		{alpn: "h3,hq", want: true},
 		{alpn: "h2", want: false},
 		{alpn: "", want: false},
 	}

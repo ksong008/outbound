@@ -298,7 +298,7 @@ func (r rangedInt) Pick() int {
 	return r.min + rand.IntN(r.max-r.min+1)
 }
 
-func normalizeMode(mode, scheme, security string, hasDownloadSettings bool) (string, error) {
+func normalizeMode(mode, scheme, security, alpn string, hasDownloadSettings bool) (string, error) {
 	mode = strings.TrimSpace(strings.ToLower(mode))
 	switch mode {
 	case "", "auto":
@@ -310,6 +310,9 @@ func normalizeMode(mode, scheme, security string, hasDownloadSettings bool) (str
 				return "stream-up", nil
 			}
 			return "stream-one", nil
+		}
+		if shouldUseH3(alpn) {
+			return "stream-up", nil
 		}
 		return "packet-up", nil
 	case "stream-up":
@@ -341,10 +344,8 @@ func normalizePath(path string) string {
 
 func shouldUseH3(alpn string) bool {
 	parts := strings.Split(alpn, ",")
-	if len(parts) != 1 {
-		return false
-	}
-	return strings.EqualFold(strings.TrimSpace(parts[0]), "h3")
+	first := strings.TrimSpace(parts[0])
+	return strings.EqualFold(first, "h3") || strings.HasPrefix(strings.ToLower(first), "h3-")
 }
 
 func parseExtra(raw string) (extraConfig, error) {
@@ -358,13 +359,13 @@ func parseExtra(raw string) (extraConfig, error) {
 	return cfg, nil
 }
 
-func buildXHTTPOptions(scheme, security, rawMode, rawExtra string) (*XHTTPOptions, error) {
+func buildXHTTPOptions(scheme, security, alpn, rawMode, rawExtra string) (*XHTTPOptions, error) {
 	extra, err := parseExtra(rawExtra)
 	if err != nil {
 		return nil, err
 	}
 
-	mode, err := normalizeMode(rawMode, scheme, security, extra.DownloadSettings != nil)
+	mode, err := normalizeMode(rawMode, scheme, security, alpn, extra.DownloadSettings != nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1143,6 +1144,25 @@ func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network str
 	}, nil
 }
 
+func (d *Dialer) acquireSingleUseRequestClient(ctx context.Context, ep endpoint, network string) (*requestClientLease, error) {
+	client, err := d.openRequestClient(ctx, ep, network)
+	if err != nil {
+		return nil, err
+	}
+	return &requestClientLease{
+		client:         client,
+		release:        client.Close,
+		consumeRequest: func() {},
+	}, nil
+}
+
+func (d *Dialer) acquireStreamingRequestClient(ctx context.Context, ep endpoint, network string, opts xmuxOptions) (*requestClientLease, error) {
+	if ep.useH3 {
+		return d.acquireSingleUseRequestClient(ctx, ep, network)
+	}
+	return d.acquireRequestClient(ctx, ep, network, opts)
+}
+
 func requestClientReuseKey(ep endpoint, network string) string {
 	return strings.Join([]string{
 		dialerIdentityKey(ep.nextDialer),
@@ -1235,15 +1255,7 @@ func (p *h3ClientPool) release(key string, entry *h3ClientEntry) error {
 
 func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network string, opts xmuxOptions) (*requestClientLease, error) {
 	if !ep.useH3 {
-		client, err := d.openRequestClient(ctx, ep, network)
-		if err != nil {
-			return nil, err
-		}
-		return &requestClientLease{
-			client:         client,
-			release:        client.Close,
-			consumeRequest: func() {},
-		}, nil
+		return d.acquireSingleUseRequestClient(ctx, ep, network)
 	}
 
 	key := requestClientReuseKey(ep, network)
@@ -1506,11 +1518,6 @@ func NewDialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link stri
 	if security == "" && u.Scheme == "https" {
 		security = "tls"
 	}
-	options, err := buildXHTTPOptions(u.Scheme, security, query.Get("mode"), query.Get("extra"))
-	if err != nil {
-		return nil, err
-	}
-
 	host := query.Get("host")
 	if host == "" {
 		host = u.Hostname()
@@ -1522,6 +1529,10 @@ func NewDialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link stri
 	alpn := query.Get("alpn")
 	if alpn == "" {
 		alpn = "h2"
+	}
+	options, err := buildXHTTPOptions(u.Scheme, security, alpn, query.Get("mode"), query.Get("extra"))
+	if err != nil {
+		return nil, err
 	}
 
 	allowInsecure := query.Get("allowInsecure") == "true" || query.Get("allowInsecure") == "1"
@@ -1575,7 +1586,11 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 	if magicNetwork.Network != "tcp" {
 		return nil, fmt.Errorf("%w: xhttp+%s", netproxy.UnsupportedTunnelTypeError, magicNetwork.Network)
 	}
-	uploadLease, err := d.acquireRequestClient(ctx, d.uploadEndpoint, network, d.xmux)
+	acquireClient := d.acquireRequestClient
+	if d.mode == "stream-up" || d.mode == "stream-one" {
+		acquireClient = d.acquireStreamingRequestClient
+	}
+	uploadLease, err := acquireClient(ctx, d.uploadEndpoint, network, d.xmux)
 	if err != nil {
 		return nil, err
 	}
@@ -1607,7 +1622,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		downloadClient := uploadClient
 		downloadLease := uploadLease
 		if d.downloadEndpoint != nil {
-			downloadLease, err = d.acquireRequestClient(ctx, downloadEndpoint, network, d.xmux)
+			downloadLease, err = acquireClient(ctx, downloadEndpoint, network, d.xmux)
 			if err != nil {
 				releaseOnError()
 				return nil, err
