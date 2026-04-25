@@ -46,8 +46,8 @@ func TestNormalizeMode(t *testing.T) {
 	}{
 		{name: "auto over https", mode: "auto", scheme: "https", want: "packet-up"},
 		{name: "empty over https", mode: "", scheme: "https", want: "packet-up"},
-		{name: "auto over h3", mode: "auto", scheme: "https", alpn: "h3", want: "stream-up"},
-		{name: "empty over h3", mode: "", scheme: "https", alpn: "h3", want: "stream-up"},
+		{name: "auto over h3", mode: "auto", scheme: "https", alpn: "h3", want: "packet-up"},
+		{name: "empty over h3", mode: "", scheme: "https", alpn: "h3", want: "packet-up"},
 		{name: "stream-up", mode: "stream-up", scheme: "https", want: "stream-up"},
 		{name: "stream-one over https", mode: "stream-one", scheme: "https", want: "stream-one"},
 		{name: "packet-up over https", mode: "packet-up", scheme: "https", want: "packet-up"},
@@ -71,7 +71,7 @@ func TestNormalizeMode(t *testing.T) {
 			if strings.Contains(tt.name, "with download") {
 				hasDownload = true
 			}
-			got, err := normalizeMode(tt.mode, tt.scheme, security, tt.alpn, hasDownload)
+			got, err := normalizeMode(tt.mode, tt.scheme, security, hasDownload)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got mode %q", got)
@@ -151,16 +151,16 @@ func TestBuildXHTTPOptionsPacketUpDefaults(t *testing.T) {
 	}
 }
 
-func TestBuildXHTTPOptionsH3AutoUsesStreamUp(t *testing.T) {
+func TestBuildXHTTPOptionsH3AutoUsesPacketUp(t *testing.T) {
 	opts, err := buildXHTTPOptions("https", "tls", "h3", "auto", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if opts.Mode != "stream-up" {
-		t.Fatalf("expected h3 auto to use stream-up, got %q", opts.Mode)
+	if opts.Mode != "packet-up" {
+		t.Fatalf("expected h3 auto to use packet-up, got %q", opts.Mode)
 	}
-	if opts.PacketMaxBytes != 0 {
-		t.Fatalf("expected stream-up to leave packet max bytes unset, got %d", opts.PacketMaxBytes)
+	if opts.PacketMaxBytes != defaultPacketMaxBytes {
+		t.Fatalf("expected packet-up default max bytes %d, got %d", defaultPacketMaxBytes, opts.PacketMaxBytes)
 	}
 }
 
@@ -270,10 +270,10 @@ func TestShouldUseH3(t *testing.T) {
 	}{
 		{alpn: "h3", want: true},
 		{alpn: "H3", want: true},
-		{alpn: "h3-29", want: true},
+		{alpn: "h3-29", want: false},
 		{alpn: "h2,h3", want: false},
-		{alpn: "h3,http/1.1", want: true},
-		{alpn: "h3,hq", want: true},
+		{alpn: "h3,http/1.1", want: false},
+		{alpn: "h3,hq", want: false},
 		{alpn: "h2", want: false},
 		{alpn: "", want: false},
 	}
@@ -282,6 +282,61 @@ func TestShouldUseH3(t *testing.T) {
 		if got := shouldUseH3(tt.alpn); got != tt.want {
 			t.Fatalf("shouldUseH3(%q) = %v, want %v", tt.alpn, got, tt.want)
 		}
+	}
+}
+
+func TestNormalizePathAndQuery(t *testing.T) {
+	tests := []struct {
+		path      string
+		wantPath  string
+		wantQuery string
+	}{
+		{path: "", wantPath: "/", wantQuery: ""},
+		{path: "xhttp", wantPath: "/xhttp/", wantQuery: ""},
+		{path: "/xhttp", wantPath: "/xhttp/", wantQuery: ""},
+		{path: "/xhttp/", wantPath: "/xhttp/", wantQuery: ""},
+		{path: "/xhttp?ed=2048", wantPath: "/xhttp/", wantQuery: "ed=2048"},
+		{path: "xhttp?ed=2048&foo=bar", wantPath: "/xhttp/", wantQuery: "ed=2048&foo=bar"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			gotPath, gotQuery := normalizePathAndQuery(tt.path)
+			if gotPath != tt.wantPath || gotQuery != tt.wantQuery {
+				t.Fatalf("normalizePathAndQuery(%q) = (%q, %q), want (%q, %q)", tt.path, gotPath, gotQuery, tt.wantPath, tt.wantQuery)
+			}
+		})
+	}
+}
+
+func TestNewDialerPreservesXHTTPPathQuery(t *testing.T) {
+	nextDialer := direct.NewDirectDialerLaddr(netip.Addr{}, direct.Option{})
+	u := url.URL{
+		Scheme: "https",
+		Host:   "example.com:443",
+		Path:   "/xhttp?ed=2048",
+		RawQuery: url.Values{
+			"host":          []string{"example.com"},
+			"sni":           []string{"example.com"},
+			"allowInsecure": []string{"true"},
+			"alpn":          []string{"h3"},
+			"mode":          []string{"auto"},
+		}.Encode(),
+	}
+
+	xDialer, err := NewDialer(&dialer.ExtraOption{}, nextDialer, u.String())
+	if err != nil {
+		t.Fatalf("new dialer: %v", err)
+	}
+	d, ok := xDialer.(*Dialer)
+	if !ok {
+		t.Fatalf("expected *Dialer, got %T", xDialer)
+	}
+	if d.uploadEndpoint.path != "/xhttp/" {
+		t.Fatalf("expected normalized path /xhttp/, got %q", d.uploadEndpoint.path)
+	}
+	if d.uploadEndpoint.rawQuery != "ed=2048" {
+		t.Fatalf("expected raw query ed=2048, got %q", d.uploadEndpoint.rawQuery)
 	}
 }
 
@@ -644,7 +699,7 @@ func TestH3StreamOneIntegration(t *testing.T) {
 	}
 }
 
-func TestH3AutoStreamUpIntegration(t *testing.T) {
+func TestH3AutoPacketUpIntegration(t *testing.T) {
 	cert := generateSelfSignedCert(t)
 
 	var (
@@ -1119,6 +1174,83 @@ func TestConnDeadlinesAreNoop(t *testing.T) {
 	}
 	if err := c.SetWriteDeadline(time.Now()); err != nil {
 		t.Fatalf("set write deadline: %v", err)
+	}
+}
+
+func TestConnEnsureDownloadBodyReturnsUploadError(t *testing.T) {
+	wantErr := errors.New("upload rejected")
+	c := &Conn{
+		respCh:      make(chan responseResult),
+		uploadErrCh: make(chan struct{}),
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- c.ensureDownloadBody()
+	}()
+
+	c.reportUploadErr(wantErr)
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("ensureDownloadBody error = %v, want %v", err, wantErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ensureDownloadBody did not unblock after upload error")
+	}
+}
+
+func TestConnReadReturnsUploadErrorWhenDownloadBodyUnblocks(t *testing.T) {
+	pr, pw := io.Pipe()
+	wantErr := errors.New("upload rejected")
+	c := &Conn{
+		downloadBody: pr,
+		uploadErrCh:  make(chan struct{}),
+		requestCancel: func() {
+			_ = pw.CloseWithError(context.Canceled)
+		},
+	}
+	defer c.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 1)
+		_, err := c.Read(buf)
+		errCh <- err
+	}()
+
+	c.reportUploadErr(wantErr)
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("Read error = %v, want %v", err, wantErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Read did not unblock after upload error")
+	}
+}
+
+func TestPacketBatchUploaderSetErrReportsUploadError(t *testing.T) {
+	wantErr := errors.New("packet upload rejected")
+	errCh := make(chan error, 1)
+	u := &packetBatchUploader{
+		onError: func(err error) {
+			errCh <- err
+		},
+	}
+	u.cond = sync.NewCond(&u.mu)
+
+	u.setErr(wantErr)
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("reported error = %v, want %v", err, wantErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("packet uploader did not report async error")
 	}
 }
 

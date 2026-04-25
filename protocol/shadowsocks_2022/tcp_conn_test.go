@@ -11,6 +11,8 @@ import (
 	"github.com/daeuniverse/outbound/protocol/socks5"
 )
 
+const testSS2022PSK128 = "MTIzNDU2Nzg5MDEyMzQ1Ng=="
+
 func TestEncodeRequestHeaderAddsPaddingWhenNoInitialPayload(t *testing.T) {
 	payload := []byte{}
 	addr, err := socks5.AddressFromString("example.com:443")

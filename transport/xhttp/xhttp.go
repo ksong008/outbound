@@ -170,6 +170,7 @@ type endpoint struct {
 	addr          string
 	host          string
 	path          string
+	rawQuery      string
 	serverName    string
 	allowInsecure bool
 	security      string
@@ -298,7 +299,7 @@ func (r rangedInt) Pick() int {
 	return r.min + rand.IntN(r.max-r.min+1)
 }
 
-func normalizeMode(mode, scheme, security, alpn string, hasDownloadSettings bool) (string, error) {
+func normalizeMode(mode, scheme, security string, hasDownloadSettings bool) (string, error) {
 	mode = strings.TrimSpace(strings.ToLower(mode))
 	switch mode {
 	case "", "auto":
@@ -310,9 +311,6 @@ func normalizeMode(mode, scheme, security, alpn string, hasDownloadSettings bool
 				return "stream-up", nil
 			}
 			return "stream-one", nil
-		}
-		if shouldUseH3(alpn) {
-			return "stream-up", nil
 		}
 		return "packet-up", nil
 	case "stream-up":
@@ -332,20 +330,32 @@ func normalizeMode(mode, scheme, security, alpn string, hasDownloadSettings bool
 	}
 }
 
-func normalizePath(path string) string {
+func normalizePathAndQuery(path string) (string, string) {
+	parts := strings.SplitN(path, "?", 2)
+	path = parts[0]
 	if path == "" {
-		return "/"
+		path = "/"
 	}
 	if !strings.HasPrefix(path, "/") {
-		return "/" + path
+		path = "/" + path
 	}
-	return path
+	if !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+	if len(parts) == 2 {
+		return path, parts[1]
+	}
+	return path, ""
+}
+
+func normalizePath(path string) string {
+	normalized, _ := normalizePathAndQuery(path)
+	return normalized
 }
 
 func shouldUseH3(alpn string) bool {
 	parts := strings.Split(alpn, ",")
-	first := strings.TrimSpace(parts[0])
-	return strings.EqualFold(first, "h3") || strings.HasPrefix(strings.ToLower(first), "h3-")
+	return len(parts) == 1 && strings.EqualFold(strings.TrimSpace(parts[0]), "h3")
 }
 
 func parseExtra(raw string) (extraConfig, error) {
@@ -359,13 +369,13 @@ func parseExtra(raw string) (extraConfig, error) {
 	return cfg, nil
 }
 
-func buildXHTTPOptions(scheme, security, alpn, rawMode, rawExtra string) (*XHTTPOptions, error) {
+func buildXHTTPOptions(scheme, security, _ string, rawMode, rawExtra string) (*XHTTPOptions, error) {
 	extra, err := parseExtra(rawExtra)
 	if err != nil {
 		return nil, err
 	}
 
-	mode, err := normalizeMode(rawMode, scheme, security, alpn, extra.DownloadSettings != nil)
+	mode, err := normalizeMode(rawMode, scheme, security, extra.DownloadSettings != nil)
 	if err != nil {
 		return nil, err
 	}
@@ -728,13 +738,15 @@ func newSecureEndpoint(
 	shortID string,
 	spiderX string,
 ) (endpoint, error) {
+	normalizedPath, rawQuery := normalizePathAndQuery(path)
 	useH3 := strings.EqualFold(security, "tls") && shouldUseH3(alpn)
 	if useH3 {
 		return endpoint{
 			nextDialer:    nextDialer,
 			addr:          addr,
 			host:          host,
-			path:          normalizePath(path),
+			path:          normalizedPath,
+			rawQuery:      rawQuery,
 			serverName:    serverName,
 			allowInsecure: allowInsecure,
 			security:      security,
@@ -770,7 +782,8 @@ func newSecureEndpoint(
 			nextDialer:    nextDialer,
 			addr:          addr,
 			host:          host,
-			path:          normalizePath(path),
+			path:          normalizedPath,
+			rawQuery:      rawQuery,
 			serverName:    serverName,
 			allowInsecure: allowInsecure,
 			security:      security,
@@ -803,7 +816,8 @@ func newSecureEndpoint(
 		nextDialer:    nextDialer,
 		addr:          addr,
 		host:          host,
-		path:          normalizePath(path),
+		path:          normalizedPath,
+		rawQuery:      rawQuery,
 		serverName:    serverName,
 		allowInsecure: allowInsecure,
 		security:      security,
@@ -1170,6 +1184,7 @@ func requestClientReuseKey(ep endpoint, network string) string {
 		ep.addr,
 		ep.host,
 		ep.path,
+		ep.rawQuery,
 		ep.serverName,
 		ep.security,
 		ep.alpn,
@@ -1370,6 +1385,7 @@ func packetUploadReuseKey(ep endpoint) string {
 		ep.addr,
 		ep.host,
 		ep.path,
+		ep.rawQuery,
 		ep.serverName,
 		ep.security,
 		ep.alpn,
@@ -1602,14 +1618,16 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 
 	sessionID := uuid.NewString()
 	uploadTargetURL := (&url.URL{
-		Scheme: "https",
-		Host:   d.uploadEndpoint.addr,
-		Path:   d.uploadEndpoint.path,
+		Scheme:   "https",
+		Host:     d.uploadEndpoint.addr,
+		Path:     d.uploadEndpoint.path,
+		RawQuery: d.uploadEndpoint.rawQuery,
 	}).String()
 	downloadTargetURL := (&url.URL{
-		Scheme: "https",
-		Host:   downloadEndpoint.addr,
-		Path:   downloadEndpoint.path,
+		Scheme:   "https",
+		Host:     downloadEndpoint.addr,
+		Path:     downloadEndpoint.path,
+		RawQuery: downloadEndpoint.rawQuery,
 	}).String()
 	requestCtx, requestCancel := context.WithCancel(context.WithoutCancel(ctx))
 	releaseOnError := func() {
@@ -1680,6 +1698,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			sharedRelease:     uploadClient == downloadClient,
 			uploadBody:        pw,
 			releaseWithBodies: true,
+			uploadErrCh:       make(chan struct{}),
 			requestCancel:     requestCancel,
 		}
 		if uploadClient == downloadClient {
@@ -1711,6 +1730,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			releaseWithBodies: true,
 			uploadBody:        pw,
 			respCh:            make(chan responseResult, 1),
+			uploadErrCh:       make(chan struct{}),
 			requestCancel:     requestCancel,
 		}
 		go conn.startStreamOne(uploadClient, uploadReq, func() { _ = uploadLease.release() })
@@ -1747,6 +1767,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			sharedRelease:     uploadClient == downloadClient,
 			releaseWithBodies: true,
 			respCh:            make(chan responseResult, 1),
+			uploadErrCh:       make(chan struct{}),
 			requestCancel:     requestCancel,
 		}
 		packetFlushDelay := 15 * time.Millisecond
@@ -1769,6 +1790,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 				d.packetMaxBytes,
 				d.packetMinGap,
 				packetFlushDelay,
+				conn.reportUploadErr,
 			)
 			conn.packetUpload = uploader.enqueue
 			if usePerRequestH3Upload {
@@ -1798,6 +1820,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 				d.packetMaxBytes,
 				d.packetMinGap,
 				packetFlushDelay,
+				conn.reportUploadErr,
 			)
 			conn.packetUpload = uploader.enqueue
 			conn.packetClose = func() error {
@@ -1829,6 +1852,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 				d.packetMaxBytes,
 				d.packetMinGap,
 				packetFlushDelay,
+				conn.reportUploadErr,
 			)
 			conn.packetUpload = xmuxUploader.enqueue
 			conn.packetClose = func() error {
@@ -1905,10 +1929,13 @@ type Conn struct {
 	packetClose       func() error
 	requestCancel     context.CancelFunc
 
-	closeOnce sync.Once
-	uploadErr error
-	respCh    chan responseResult
-	writeMu   sync.Mutex
+	closeOnce     sync.Once
+	uploadErrMu   sync.Mutex
+	uploadErrOnce sync.Once
+	uploadErr     error
+	uploadErrCh   chan struct{}
+	respCh        chan responseResult
+	writeMu       sync.Mutex
 }
 
 type responseResult struct {
@@ -1985,6 +2012,7 @@ type packetBatchUploader struct {
 	host            string
 	dialer          *Dialer
 	sessionID       string
+	onError         func(error)
 }
 
 func newPacketBatchUploader(
@@ -1998,6 +2026,7 @@ func newPacketBatchUploader(
 	maxUploadSize int,
 	minGap time.Duration,
 	flushDelay time.Duration,
+	onError func(error),
 ) *packetBatchUploader {
 	u := &packetBatchUploader{
 		flushDelay:      flushDelay,
@@ -2010,6 +2039,7 @@ func newPacketBatchUploader(
 		host:            host,
 		dialer:          dialer,
 		sessionID:       sessionID,
+		onError:         onError,
 	}
 	u.cond = sync.NewCond(&u.mu)
 	u.wg.Add(1)
@@ -2121,13 +2151,48 @@ func (u *packetBatchUploader) run() {
 }
 
 func (u *packetBatchUploader) setErr(err error) {
+	var notify bool
 	u.mu.Lock()
-	defer u.mu.Unlock()
 	if u.err == nil {
 		u.err = err
+		notify = true
 	}
 	u.closed = true
 	u.cond.Broadcast()
+	u.mu.Unlock()
+	if notify && u.onError != nil {
+		u.onError(err)
+	}
+}
+
+func (c *Conn) rememberUploadErr(err error) {
+	if err == nil {
+		return
+	}
+	c.uploadErrMu.Lock()
+	if c.uploadErr == nil {
+		c.uploadErr = err
+	}
+	c.uploadErrMu.Unlock()
+}
+
+func (c *Conn) reportUploadErr(err error) {
+	if err == nil {
+		return
+	}
+	c.uploadErrOnce.Do(func() {
+		c.rememberUploadErr(err)
+		if c.uploadErrCh != nil {
+			close(c.uploadErrCh)
+		}
+		c.cancelRequests()
+	})
+}
+
+func (c *Conn) currentUploadErr() error {
+	c.uploadErrMu.Lock()
+	defer c.uploadErrMu.Unlock()
+	return c.uploadErr
 }
 
 func (c *Conn) finishUpload(rt requestRoundTripper, req *http.Request, onDone func()) {
@@ -2136,13 +2201,13 @@ func (c *Conn) finishUpload(rt requestRoundTripper, req *http.Request, onDone fu
 	}
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
-		c.uploadErr = err
+		c.reportUploadErr(err)
 		return
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		c.uploadErr = xhttpErrf("upload", "upload path returned %s", resp.Status)
+		c.reportUploadErr(xhttpErrf("upload", "upload path returned %s", resp.Status))
 	}
 }
 
@@ -2190,10 +2255,31 @@ func (c *Conn) ensureDownloadBody() error {
 	if c.downloadBody != nil || c.respCh == nil {
 		return nil
 	}
-	result := <-c.respCh
+	if err := c.currentUploadErr(); err != nil {
+		return err
+	}
+	var result responseResult
+	if c.uploadErrCh != nil {
+		select {
+		case result = <-c.respCh:
+		case <-c.uploadErrCh:
+			if err := c.currentUploadErr(); err != nil {
+				return err
+			}
+			return io.ErrClosedPipe
+		}
+	} else {
+		result = <-c.respCh
+	}
 	if result.err != nil {
-		c.uploadErr = result.err
+		c.rememberUploadErr(result.err)
 		return result.err
+	}
+	if err := c.currentUploadErr(); err != nil {
+		if result.body != nil {
+			_ = result.body.Close()
+		}
+		return err
 	}
 	c.downloadBody = result.body
 	return nil
@@ -2203,24 +2289,40 @@ func (c *Conn) Read(p []byte) (n int, err error) {
 	if err := c.ensureDownloadBody(); err != nil {
 		return 0, err
 	}
-	return c.downloadBody.Read(p)
+	if c.downloadBody == nil {
+		if err := c.currentUploadErr(); err != nil {
+			return 0, err
+		}
+		return 0, io.ErrClosedPipe
+	}
+	n, err = c.downloadBody.Read(p)
+	if n == 0 && err != nil {
+		if uploadErr := c.currentUploadErr(); uploadErr != nil {
+			return 0, uploadErr
+		}
+	}
+	return n, err
 }
 
 func (c *Conn) Write(p []byte) (n int, err error) {
-	if c.uploadErr != nil {
-		return 0, c.uploadErr
+	if err := c.currentUploadErr(); err != nil {
+		return 0, err
 	}
 	if c.packetUpload != nil {
 		c.writeMu.Lock()
 		defer c.writeMu.Unlock()
 		buf := append([]byte(nil), p...)
 		if err := c.packetUpload(buf); err != nil {
-			c.uploadErr = err
+			c.reportUploadErr(err)
 			return 0, err
 		}
 		return len(p), nil
 	}
-	return c.uploadBody.Write(p)
+	n, err = c.uploadBody.Write(p)
+	if err != nil {
+		c.reportUploadErr(err)
+	}
+	return n, err
 }
 
 func (c *Conn) CloseWrite() error {
@@ -2231,7 +2333,7 @@ func (c *Conn) CloseWrite() error {
 		err = c.uploadBody.Close()
 	}
 	if err != nil {
-		c.cancelRequests()
+		c.reportUploadErr(err)
 	}
 	return err
 }
@@ -2249,7 +2351,7 @@ func (c *Conn) closePendingDownloadBody() {
 	select {
 	case result := <-c.respCh:
 		if result.err != nil {
-			c.uploadErr = result.err
+			c.rememberUploadErr(result.err)
 		}
 		if result.body != nil {
 			_ = result.body.Close()
