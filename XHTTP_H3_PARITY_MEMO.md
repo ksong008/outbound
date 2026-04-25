@@ -283,6 +283,148 @@ Latest A/B experiment note:
   - determine whether preserving a shared H3 client after upload-only errors was
     actually making later requests less stable
 
+### 2026-04-25
+
+Final packet-up parity pass after comparing the current Xray `splithttp`
+implementation:
+
+- plain TLS `mode=auto` was moved back to official parity:
+  - normal TLS -> `packet-up`
+  - REALITY -> `stream-one` or `stream-up`, depending on download settings
+- `h3 + auto` no longer has a special case that forces `stream-up`
+- ALPN H3 detection was tightened:
+  - only a single ALPN value exactly equal to `h3` enables H3
+  - mixed ALPN such as `h3,http/1.1` no longer forces H3
+- XHTTP paths now preserve query strings correctly:
+  - `path=/xhttp?ed=2048` is normalized to:
+    - path: `/xhttp/`
+    - raw query: `ed=2048`
+  - request URLs use `RawQuery` instead of encoding the query into `URL.Path`
+- upload-side failures now wake the read side:
+  - `finishUpload`
+  - `packet-up` async uploader
+  - `Write`
+  - `Read`
+  now share one upload-error notification path
+
+Additional test tooling:
+
+- `hack/xhttp_smoke.go` now supports:
+  - `XHTTP_SMOKE_URL`
+  - HTTPS/TLS/SNI over the proxy tunnel
+  - `XHTTP_SMOKE_METHOD`
+  - phase reporting: `parse`, `dial`, `tls`, `write`, `read`
+- this allows browser-like checks such as:
+  - `XHTTP_SMOKE_METHOD=GET`
+  - `XHTTP_SMOKE_URL=https://www.youtube.com/`
+
+VPS test setup:
+
+- server:
+  - `156.246.90.2`
+- Xray config:
+  - `/opt/xhttp-test-156/config.json`
+- Xray process:
+  - `/usr/local/bin/xray run -c /opt/xhttp-test-156/config.json`
+- note:
+  - this test Xray is currently run with `nohup`, not a systemd unit
+- existing test inbounds:
+  - `18443/tcp`: `vless-xhttp-h2`, `mode=auto`, ALPN `h2,http/1.1`
+  - `18444/udp`: `vless-xhttp-h3`, `mode=auto`, ALPN `h3`
+  - `18445/tcp`: `vless-xhttp-h2-stream-up`, `mode=stream-up`, ALPN `h2,http/1.1`
+  - `18446/udp`: `vless-xhttp-h3-stream-up`, `mode=stream-up`, ALPN `h3`
+  - `18447/udp`: `vless-xhttp-h3-packet-up`, `mode=packet-up`, ALPN `h3`
+
+Primary test links:
+
+- H3 auto:
+  - `vless://7c12c745-63a5-433d-9e60-022e469b5bd4@156.246.90.2:18444?type=xhttp&security=tls&host=office.mitsuha.me&sni=office.mitsuha.me&path=%2Fxhttp&mode=auto&alpn=h3&fp=chrome#xhttp-h3-auto-18444`
+- H3 packet-up:
+  - `vless://7c12c745-63a5-433d-9e60-022e469b5bd4@156.246.90.2:18447?type=xhttp&security=tls&host=office.mitsuha.me&sni=office.mitsuha.me&path=%2Fxhttp&mode=packet-up&alpn=h3&fp=chrome#xhttp-h3-packet-up-18447`
+- H3 stream-up comparison:
+  - `vless://7c12c745-63a5-433d-9e60-022e469b5bd4@156.246.90.2:18446?type=xhttp&security=tls&host=office.mitsuha.me&sni=office.mitsuha.me&path=%2Fxhttp&mode=stream-up&alpn=h3&fp=chrome#xhttp-h3-stream-up-18446`
+
+Remote smoke results:
+
+- `18447` H3 packet-up:
+  - `XHTTP_SMOKE_METHOD=GET`
+  - `XHTTP_SMOKE_URL=https://www.youtube.com/`
+  - result:
+    - `HTTP/1.1 200 OK`
+- additional YouTube-like checks on `18447`:
+  - `https://www.youtube.com/`
+  - `https://www.youtube.com/generate_204`
+  - `https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg`
+  - `https://www.youtube.com/embed/dQw4w9WgXcQ`
+  - all returned an HTTP status line successfully
+- `18444` H3 auto:
+  - `XHTTP_SMOKE_METHOD=GET`
+  - `XHTTP_SMOKE_URL=https://www.youtube.com/`
+  - result:
+    - `HTTP/1.1 200 OK`
+
+Remote log observations:
+
+- `18447` packet-up logs hit:
+  - `[vless-xhttp-h3-packet-up >> direct]`
+  - targets included:
+    - `www.youtube.com:443`
+    - `*.googlevideo.com:443`
+    - UDP/443 Google endpoints
+- `18444` auto logs hit:
+  - `[vless-xhttp-h3 >> direct]`
+  - targets included:
+    - `www.youtube.com:443`
+    - `accounts.youtube.com:443`
+    - `yt3.ggpht.com:443`
+    - `*.googlevideo.com:443`
+    - UDP/443 Google endpoints
+- recurring `H3_REQUEST_CANCELLED` / `Application error 0x0 (remote)` lines were
+  observed after successful smoke responses
+  - current interpretation:
+    - these are likely client-side close/cancel events after the test request
+      already read the response
+    - they were not accompanied by path mismatch, auth failure, HTTP 400, or
+      packet-up rejection logs
+
+Validation before commit:
+
+- local:
+  - `go test ./... -run=^$`
+  - `go build ./...`
+  - `go test -count=1 ./transport/xhttp ./dialer/v2ray`
+  - root repository commit hook:
+    - `turbo run test`
+- GitHub Actions:
+  - `outbound-quicpersonal`
+    - commit: `6444846`
+    - result: success
+    - URL: `https://github.com/ksong008/outbound/actions/runs/24926975056`
+  - `daed Test Linux x86_64 v2-v3`
+    - commit: `ea0d0c3b`
+    - result: success
+    - both v2 and v3 jobs passed
+    - URL: `https://github.com/ksong008/daed/actions/runs/24926979385`
+
+Committed chain:
+
+- `outbound@6444846`
+  - `fix(xhttp): align h3 packet-up behavior`
+- `dae-wing@54cadbf`
+  - `chore(submodule): bump outbound xhttp packet-up fix`
+- `daed@ea0d0c3b`
+  - `chore(submodule): bump wing xhttp packet-up fix`
+
+Current recommendation:
+
+- use `18447` explicit `packet-up` as the primary server-side validation link
+- use `18444` `auto+h3` as the subscription-style compatibility check
+- keep `18446` `stream-up+h3` only as a comparison link
+- no additional `daed` top-level code change is needed for this XHTTP fix
+- optional server cleanup:
+  - add a systemd unit for `/opt/xhttp-test-156` if this VPS test service should
+    remain long term
+
 ## H3 Stream-Up Stability Work List
 
 Confirmed context for this list:
