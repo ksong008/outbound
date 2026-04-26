@@ -332,7 +332,7 @@ func (vc *Conn) write(p []byte) (err error) {
 				return ErrNotTLS13
 			}
 		} else {
-			panic("fixme")
+			return fmt.Errorf("unsupported outer tls connection type: %T", vc.tlsConn)
 		}
 		vc.tlsConn = nil
 		return nil
