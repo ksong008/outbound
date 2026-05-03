@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/daeuniverse/outbound/dialer"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/daeuniverse/quic-go"
 	"github.com/daeuniverse/quic-go/http3"
@@ -127,6 +128,12 @@ func TestBuildXHTTPOptions(t *testing.T) {
 	if opts.Headers.Get("User-Agent") != "xray" {
 		t.Fatalf("expected User-Agent header to be preserved")
 	}
+	if opts.Headers.Get("Accept") != "*/*" {
+		t.Fatalf("expected default Accept header, got %q", opts.Headers.Get("Accept"))
+	}
+	if opts.Headers.Get("Accept-Language") != "en-US,en;q=0.9" {
+		t.Fatalf("expected default Accept-Language header, got %q", opts.Headers.Get("Accept-Language"))
+	}
 	if opts.PacketMaxBytes < 16 || opts.PacketMaxBytes > 32 {
 		t.Fatalf("expected packet max bytes in range [16,32], got %d", opts.PacketMaxBytes)
 	}
@@ -135,6 +142,16 @@ func TestBuildXHTTPOptions(t *testing.T) {
 	}
 	if opts.SessionPlacement != "header" {
 		t.Fatalf("expected session placement to be kept, got %q", opts.SessionPlacement)
+	}
+}
+
+func TestBuildXHTTPOptionsAcceptsUplinkHttpMethodAlias(t *testing.T) {
+	opts, err := buildXHTTPOptions("https", "tls", "h2", "stream-up", `{"uplinkHttpMethod":"PUT"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.UplinkHTTPMethod != "PUT" {
+		t.Fatalf("expected uplinkHttpMethod alias to be preserved, got %q", opts.UplinkHTTPMethod)
 	}
 }
 
@@ -184,6 +201,12 @@ func TestBuildXHTTPOptionsRejectsUnsupportedCombinations(t *testing.T) {
 			want:  "downloadSettings.xhttpSettings.mode is not supported yet",
 		},
 		{
+			name:  "download settings extra unsupported key",
+			mode:  "stream-up",
+			extra: `{"downloadSettings":{"address":"example.com","port":443,"network":"xhttp","security":"tls","xhttpSettings":{"host":"example.com","path":"/download","extra":"{\"headers\":{\"X-Test\":\"1\"}}"}}}`,
+			want:  "downloadSettings.xhttpSettings.extra currently only supports xmux",
+		},
+		{
 			name:  "no sse header unsupported",
 			mode:  "stream-up",
 			extra: `{"noSSEHeader":true}`,
@@ -207,6 +230,90 @@ func TestBuildXHTTPOptionsRejectsUnsupportedCombinations(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %v", tt.want, err)
 			}
 		})
+	}
+}
+
+func TestBuildXHTTPOptionsDownloadExtraXmux(t *testing.T) {
+	opts, err := buildXHTTPOptions("https", "tls", "h2", "stream-up", `{
+		"xmux":{"maxConnections":"1"},
+		"downloadSettings":{
+			"address":"example.com",
+			"port":443,
+			"network":"xhttp",
+			"security":"tls",
+			"xhttpSettings":{
+				"host":"example.com",
+				"path":"/download",
+				"extra":"{\"xmux\":{\"maxConnections\":\"3\",\"cMaxReuseTimes\":\"9\"}}"
+			}
+		}
+	}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !opts.DownloadXmux.enabled {
+		t.Fatalf("expected nested download xmux to be enabled")
+	}
+	if opts.DownloadXmux.maxConnections != 3 {
+		t.Fatalf("expected nested download xmux maxConnections=3, got %d", opts.DownloadXmux.maxConnections)
+	}
+	if opts.DownloadXmux.maxReuseTimes != 9 {
+		t.Fatalf("expected nested download xmux cMaxReuseTimes=9, got %d", opts.DownloadXmux.maxReuseTimes)
+	}
+}
+
+func TestBuildXHTTPOptionsDownloadRequestOverrides(t *testing.T) {
+	opts, err := buildXHTTPOptions("https", "tls", "h2", "stream-up", `{
+		"headers":{"X-Base":"1"},
+		"sessionPlacement":"path",
+		"xPaddingBytes":"2",
+		"downloadSettings":{
+			"address":"example.com",
+			"port":443,
+			"network":"xhttp",
+			"security":"tls",
+			"xhttpSettings":{
+				"host":"example.com",
+				"path":"/download",
+				"headers":{"X-Download":"1"},
+				"xPaddingObfsMode":true,
+				"xPaddingHeader":"X-Pad",
+				"xPaddingBytes":"1",
+				"sessionPlacement":"header",
+				"sessionKey":"X-Download-Session"
+			}
+		}
+	}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.DownloadHeaders.Get("X-Base") != "1" || opts.DownloadHeaders.Get("X-Download") != "1" {
+		t.Fatalf("expected merged download headers, got %#v", opts.DownloadHeaders)
+	}
+	if opts.DownloadSessionPlacement != "header" || opts.DownloadSessionKey != "X-Download-Session" {
+		t.Fatalf("unexpected download session overrides: placement=%q key=%q", opts.DownloadSessionPlacement, opts.DownloadSessionKey)
+	}
+	if opts.DownloadXPaddingBytes.Pick() != 1 {
+		t.Fatalf("expected overridden download xPaddingBytes=1")
+	}
+	if opts.DownloadXPaddingObfsMode == nil || !*opts.DownloadXPaddingObfsMode {
+		t.Fatalf("expected overridden download xPaddingObfsMode=true")
+	}
+	if opts.DownloadXPaddingHeader != "X-Pad" {
+		t.Fatalf("expected overridden download xPaddingHeader, got %q", opts.DownloadXPaddingHeader)
+	}
+}
+
+func TestParseXmuxHKeepAlivePeriod(t *testing.T) {
+	opts := parseXmux(&xmuxConfig{
+		MaxConnections:   rangedInt{set: true, min: 1, max: 1},
+		HKeepAlivePeriod: 45,
+	})
+	if !opts.enabled {
+		t.Fatalf("expected xmux options to be enabled")
+	}
+	if opts.hKeepAlivePeriod != 45 {
+		t.Fatalf("expected hKeepAlivePeriod=45, got %d", opts.hKeepAlivePeriod)
 	}
 }
 
@@ -282,6 +389,52 @@ func TestShouldUseH3(t *testing.T) {
 		if got := shouldUseH3(tt.alpn); got != tt.want {
 			t.Fatalf("shouldUseH3(%q) = %v, want %v", tt.alpn, got, tt.want)
 		}
+	}
+}
+
+func TestSupportsH2(t *testing.T) {
+	tests := []struct {
+		alpn string
+		want bool
+	}{
+		{alpn: "", want: true},
+		{alpn: "h2", want: true},
+		{alpn: "h2,http/1.1", want: true},
+		{alpn: "http/1.1", want: false},
+		{alpn: "h3", want: false},
+	}
+	for _, tt := range tests {
+		if got := supportsH2(tt.alpn); got != tt.want {
+			t.Fatalf("supportsH2(%q) = %v, want %v", tt.alpn, got, tt.want)
+		}
+	}
+}
+
+func TestShouldUseHTTP1(t *testing.T) {
+	tests := []struct {
+		alpn string
+		want bool
+	}{
+		{alpn: "http/1.1", want: true},
+		{alpn: "HTTP/1.1", want: true},
+		{alpn: "h2,http/1.1", want: false},
+		{alpn: "h2", want: false},
+	}
+	for _, tt := range tests {
+		if got := shouldUseHTTP1(tt.alpn); got != tt.want {
+			t.Fatalf("shouldUseHTTP1(%q) = %v, want %v", tt.alpn, got, tt.want)
+		}
+	}
+}
+
+func TestNewDialerRejectsUnsupportedALPN(t *testing.T) {
+	nextDialer := direct.NewDirectDialerLaddr(netip.Addr{}, direct.Option{})
+	_, err := NewDialer(&dialer.ExtraOption{}, nextDialer, "https://example.com/x?host=example.com&sni=example.com&allowInsecure=true&alpn=hq&mode=stream-up")
+	if err == nil {
+		t.Fatal("expected unsupported alpn to be rejected")
+	}
+	if !strings.Contains(err.Error(), "only h2, exact h3, or exact http/1.1 are supported") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -565,6 +718,141 @@ func TestAcquireRequestClientRotatesH3ClientAfterRequestBudget(t *testing.T) {
 	defer globalH3RequestPool.mu.Unlock()
 	if got := len(globalH3RequestPool.entries[key]); got != 0 {
 		t.Fatalf("expected exhausted H3 client to be removed from pool, got %d entries", got)
+	}
+}
+
+type recordingXHTTPDialer struct {
+	lastNetwork string
+	lastAddr    string
+	err         error
+}
+
+func (d *recordingXHTTPDialer) DialContext(ctx context.Context, network, addr string) (netproxy.Conn, error) {
+	d.lastNetwork = network
+	d.lastAddr = addr
+	return nil, d.err
+}
+
+func TestOpenH2ConnPreservesMagicNetwork(t *testing.T) {
+	sentinel := errors.New("dial failed")
+	inner := &recordingXHTTPDialer{err: sentinel}
+	d := &Dialer{}
+	_, _, err := d.openH2Conn(context.Background(), endpoint{dialer: inner}, netproxy.MagicNetwork{Network: "tcp", Mark: 7, Mptcp: true}.Encode(), xmuxOptions{})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected dial error, got %v", err)
+	}
+	got, err := netproxy.ParseMagicNetwork(inner.lastNetwork)
+	if err != nil {
+		t.Fatalf("ParseMagicNetwork returned error: %v", err)
+	}
+	if got.Network != "tcp" || got.Mark != 7 || !got.Mptcp {
+		t.Fatalf("unexpected forwarded network: %+v", got)
+	}
+}
+
+func TestPacketUploadReuseKeyIncludesNetwork(t *testing.T) {
+	ep := endpoint{
+		addr:       "example.com:443",
+		host:       "example.com",
+		path:       "/xhttp",
+		serverName: "example.com",
+		security:   "tls",
+		alpn:       "h2",
+	}
+	keyA := packetUploadReuseKey(ep, netproxy.MagicNetwork{Network: "tcp", Mark: 1}.Encode())
+	keyB := packetUploadReuseKey(ep, netproxy.MagicNetwork{Network: "tcp", Mark: 2}.Encode())
+	if keyA == keyB {
+		t.Fatalf("expected packet upload reuse key to include route network")
+	}
+}
+
+func TestPrepareDownloadRequestUsesDownloadOverrides(t *testing.T) {
+	trueVal := true
+	d := &Dialer{
+		downloadHeaders:           http.Header{"X-Download": []string{"1"}},
+		downloadXPaddingBytes:     rangedInt{set: true, min: 1, max: 1},
+		downloadXPaddingObfsMode:  &trueVal,
+		downloadXPaddingHeader:    "X-Pad",
+		downloadXPaddingPlacement: "header",
+		downloadSessionPlacement:  "header",
+		downloadSessionKey:        "X-Download-Session",
+	}
+	req, _ := http.NewRequest(http.MethodGet, "https://example.com/download", nil)
+	d.prepareDownloadRequest(req, "sess")
+	if req.Header.Get("X-Download") != "1" {
+		t.Fatalf("expected download header override, got %#v", req.Header)
+	}
+	if req.Header.Get("X-Download-Session") != "sess" {
+		t.Fatalf("expected download session header, got %#v", req.Header)
+	}
+	if req.Header.Get("X-Pad") != "X" {
+		t.Fatalf("expected download padding header, got %#v", req.Header)
+	}
+}
+
+type captureRoundTripper struct {
+	mu     sync.Mutex
+	bodies [][]byte
+}
+
+func (rt *captureRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body []byte
+	if req.Body != nil {
+		var err error
+		body, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+	}
+	rt.mu.Lock()
+	rt.bodies = append(rt.bodies, body)
+	rt.mu.Unlock()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("")),
+	}, nil
+}
+
+func (rt *captureRoundTripper) captured() [][]byte {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	out := make([][]byte, len(rt.bodies))
+	copy(out, rt.bodies)
+	return out
+}
+
+func TestPacketBatchUploaderMergesWithinTimerWindow(t *testing.T) {
+	rt := &captureRoundTripper{}
+	uploader := newPacketBatchUploader(
+		context.Background(),
+		rt,
+		nil,
+		"https://example.com/upload",
+		"example.com",
+		&Dialer{},
+		"sess",
+		64,
+		30*time.Millisecond,
+		30*time.Millisecond,
+		func(error) {},
+	)
+	if err := uploader.enqueue([]byte("hello")); err != nil {
+		t.Fatalf("enqueue 1: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if err := uploader.enqueue([]byte("-world")); err != nil {
+		t.Fatalf("enqueue 2: %v", err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if err := uploader.close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	bodies := rt.captured()
+	if len(bodies) != 1 {
+		t.Fatalf("expected one merged request, got %d", len(bodies))
+	}
+	if string(bodies[0]) != "hello-world" {
+		t.Fatalf("expected merged payload, got %q", string(bodies[0]))
 	}
 }
 
@@ -1450,5 +1738,48 @@ func TestPacketUpH2Integration(t *testing.T) {
 	}
 	if string(buf) != string(payload) {
 		t.Fatalf("unexpected echo: got %q want %q", string(buf), string(payload))
+	}
+}
+
+func TestOpenRequestClientHTTP11RoundTrip(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+
+	nextDialer := direct.NewDirectDialerLaddr(netip.Addr{}, direct.Option{})
+	ep, err := newSecureEndpoint(&dialer.ExtraOption{}, nextDialer, serverURL.Host, serverURL.Hostname(), "/x", "tls", serverURL.Hostname(), true, "http/1.1", "", "", "", "")
+	if err != nil {
+		t.Fatalf("newSecureEndpoint: %v", err)
+	}
+	d := &Dialer{}
+	client, err := d.openRequestClient(context.Background(), ep, "tcp", xmuxOptions{hKeepAlivePeriod: 45})
+	if err != nil {
+		t.Fatalf("openRequestClient: %v", err)
+	}
+	defer client.Close()
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/x", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Host = serverURL.Hostname()
+	resp, err := client.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != "ok" {
+		t.Fatalf("unexpected body: %q", string(body))
 	}
 }

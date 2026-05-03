@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -77,6 +78,37 @@ func SetValue(values *url.Values, key string, value string) {
 		return
 	}
 	values.Set(key, value)
+}
+
+func ParseQueryBool(values url.Values, keys ...string) bool {
+	for _, key := range keys {
+		raw := values.Get(key)
+		if raw == "" {
+			continue
+		}
+		v, err := strconv.ParseBool(raw)
+		if err == nil && v {
+			return true
+		}
+	}
+	return false
+}
+
+func ParseAllowInsecure(values url.Values) bool {
+	return ParseQueryBool(values, "allowInsecure", "allow_insecure", "allowinsecure", "skipVerify")
+}
+
+func IdentityKey(v any) string {
+	if v == nil {
+		return "<nil>"
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return fmt.Sprintf("%T:%x", v, rv.Pointer())
+	default:
+		return fmt.Sprintf("%T:%#v", v, v)
+	}
 }
 
 func GetTagFromLinkLikePlaintext(link string) (tag string, afterTag string) {

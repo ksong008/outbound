@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/daeuniverse/outbound/internal/testutil"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/direct"
@@ -20,6 +21,7 @@ type Params struct {
 }
 
 func TestTcp(t *testing.T) {
+	testutil.RequireLiveIntegration(t, "requires a live Juicity server on example.com:50001 and external HTTPS reachability")
 	d, err := NewDialer(direct.SymmetricDirect, protocol.Header{
 		ProxyAddress: "example.com:50001",
 		SNI:          "",
@@ -59,6 +61,7 @@ func TestTcp(t *testing.T) {
 }
 
 func TestUdp(t *testing.T) {
+	testutil.RequireLiveIntegration(t, "requires a live Juicity server on example.com:50001 and external DNS reachability")
 	d, err := NewDialer(direct.SymmetricDirect, protocol.Header{
 		ProxyAddress: "example.com:50001",
 		SNI:          "",

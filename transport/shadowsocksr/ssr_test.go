@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/daeuniverse/outbound/internal/testutil"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/direct"
@@ -18,6 +19,7 @@ import (
 )
 
 func TestTcp(t *testing.T) {
+	testutil.RequireLiveIntegration(t, "requires a live ShadowsocksR server on 127.0.0.1:8989 and external HTTPS reachability")
 	// https://github.com/winterssy/SSR-Docker
 	// Remember to set protocol_param to 3000# (max_client)
 	d := direct.SymmetricDirect
@@ -72,6 +74,7 @@ func TestTcp(t *testing.T) {
 }
 
 func TestUdp(t *testing.T) {
+	testutil.RequireLiveIntegration(t, "requires a live ShadowsocksR server on 127.0.0.1:8989 and external DNS reachability")
 	// https://github.com/winterssy/SSR-Docker
 	// Remember to set protocol_param to 3000# (max_client)
 	d := direct.SymmetricDirect

@@ -13,7 +13,6 @@ import (
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
-	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/daeuniverse/outbound/protocol/http"
 	"github.com/daeuniverse/outbound/transport/grpc"
 	"github.com/daeuniverse/outbound/transport/httpupgrade"
@@ -233,7 +232,7 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 				"transport":         []string{"1"},
 			}.Encode(),
 		}
-		d, err = http.NewHTTPProxy(&u, direct.SymmetricDirect)
+		d, err = http.NewHTTPProxy(&u, d)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -358,7 +357,7 @@ func ParseVlessURL(vless string) (data *V2Ray, err error) {
 		TLS:           u.Query().Get("security"),
 		Flow:          canonicalVlessFlow(u.Query().Get("flow")),
 		Alpn:          u.Query().Get("alpn"),
-		AllowInsecure: u.Query().Get("allowInsecure") == "1" || strings.EqualFold(u.Query().Get("allowInsecure"), "true"),
+		AllowInsecure: common.ParseAllowInsecure(u.Query()),
 		Fingerprint:   u.Query().Get("fp"),
 		PublicKey:     u.Query().Get("pbk"),
 		ShortId:       u.Query().Get("sid"),
@@ -495,7 +494,7 @@ func (s *V2Ray) ExportToURL() string {
 		case "grpc":
 			common.SetValue(&query, "serviceName", s.Path)
 		case "meek":
-			common.SetValue(&query, "url", s.Host)
+			common.SetValue(&query, "url", s.Path)
 		}
 
 		//TODO: QUIC

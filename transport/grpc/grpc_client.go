@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/cert"
 	proto "github.com/daeuniverse/outbound/pkg/gun_proto"
@@ -28,15 +29,24 @@ type clientConnMeta struct {
 	cc *grpc.ClientConn
 }
 
+type clientConnCacheKey struct {
+	address       string
+	serverName    string
+	dialer        string
+	allowInsecure bool
+	somark        uint32
+	mptcp         bool
+}
+
 var (
-	globalCCMap    map[string]*clientConnMeta
+	globalCCMap    map[clientConnCacheKey]*clientConnMeta
 	globalCCAccess sync.Mutex
 )
 
 func CleanGlobalClientConnectionCache() {
 	globalCCAccess.Lock()
 	old := globalCCMap
-	globalCCMap = make(map[string]*clientConnMeta)
+	globalCCMap = make(map[clientConnCacheKey]*clientConnMeta)
 	globalCCAccess.Unlock()
 
 	for _, meta := range old {
@@ -47,6 +57,39 @@ func CleanGlobalClientConnectionCache() {
 }
 
 type ccCanceller func()
+
+func newClientConnCacheKey(tcpDialer netproxy.Dialer, serverName string, address string, allowInsecure bool, somark uint32, mptcp bool) clientConnCacheKey {
+	return clientConnCacheKey{
+		address:       address,
+		serverName:    serverName,
+		dialer:        common.IdentityKey(tcpDialer),
+		allowInsecure: allowInsecure,
+		somark:        somark,
+		mptcp:         mptcp,
+	}
+}
+
+func newDetachedStreamContext(ctx context.Context) (context.Context, context.CancelFunc, func()) {
+	streamCtx, streamCancel := context.WithCancel(context.Background())
+	stopCh := make(chan struct{})
+	var once sync.Once
+	go func() {
+		select {
+		case <-ctx.Done():
+			select {
+			case <-stopCh:
+			default:
+				streamCancel()
+			}
+		case <-stopCh:
+		}
+	}()
+	return streamCtx, streamCancel, func() {
+		once.Do(func() {
+			close(stopCh)
+		})
+	}
+}
 
 type ClientConn struct {
 	tun       proto.GunService_TunClient
@@ -337,11 +380,17 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
 	if serviceName == "" {
 		serviceName = "GunService"
 	}
-	// ctx is the lifetime of the tun
-	ctxStream, streamCloser := context.WithCancel(context.Background())
+	ctxStream, streamCloser, stopFollowing := newDetachedStreamContext(ctx)
 	tun, err := clientX.TunCustomName(ctxStream, serviceName)
+	stopFollowing()
 	if err != nil {
 		streamCloser()
+		cancel()
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		streamCloser()
+		cancel()
 		return nil, err
 	}
 	return NewClientConn(tun, streamCloser), nil
@@ -357,20 +406,23 @@ func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverNam
 
 	globalCCAccess.Lock()
 	if globalCCMap == nil {
-		globalCCMap = make(map[string]*clientConnMeta)
+		globalCCMap = make(map[clientConnCacheKey]*clientConnMeta)
 	}
 	globalCCAccess.Unlock()
+	key := newClientConnCacheKey(tcpDialer, serverName, address, allowInsecure, somark, mptcp)
 
 	canceller := func() {
 		globalCCAccess.Lock()
 		defer globalCCAccess.Unlock()
-		globalCCMap[address].cc.Close()
-		delete(globalCCMap, address)
+		if meta := globalCCMap[key]; meta != nil && meta.cc != nil {
+			_ = meta.cc.Close()
+		}
+		delete(globalCCMap, key)
 	}
 
 	// TODO Should support chain proxy to the same destination
 	globalCCAccess.Lock()
-	if meta, found := globalCCMap[address]; found && meta.cc.GetState() != connectivity.Shutdown {
+	if meta, found := globalCCMap[key]; found && meta.cc.GetState() != connectivity.Shutdown {
 		globalCCAccess.Unlock()
 		return meta, canceller, nil
 	}
@@ -413,7 +465,7 @@ func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverNam
 		return nil, canceller, err
 	}
 	globalCCAccess.Lock()
-	globalCCMap[address] = meta
+	globalCCMap[key] = meta
 	globalCCAccess.Unlock()
 	return meta, canceller, err
 }

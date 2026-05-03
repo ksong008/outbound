@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
@@ -19,8 +20,11 @@ func init() {
 }
 
 type Dialer struct {
-	client   client.Client
-	metadata protocol.Metadata
+	nextDialer netproxy.Dialer
+	baseConfig client.Config
+	clients    map[string]client.Client
+	metadata   protocol.Metadata
+	mu         sync.Mutex
 }
 
 type Feature1 struct {
@@ -35,7 +39,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		IsClient: header.IsClient,
 	}
 
-	config := &client.Config{
+	config := client.Config{
 		TLSConfig: client.TLSConfig{
 			ServerName:            header.TlsConfig.ServerName,
 			InsecureSkipVerify:    header.TlsConfig.InsecureSkipVerify,
@@ -66,47 +70,11 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		return nil, err
 	}
 
-	if config.ServerAddr.Network() == "udphop" {
-		config.ConnFactory = &client.UdpConnFactory{
-			NewFunc: func(ctx context.Context) (net.PacketConn, error) {
-				dialFunc := func(addr net.Addr) (net.PacketConn, error) {
-					conn, err := nextDialer.DialContext(ctx, "udp", addr.String())
-					if err != nil {
-						return nil, err
-					}
-					return netproxy.NewFakeNetPacketConn(
-						conn.(netproxy.PacketConn),
-						net.UDPAddrFromAddrPort(common.GetUniqueFakeAddrPort()),
-						addr,
-					), nil
-				}
-				return udphop.NewUDPHopPacketConn(config.ServerAddr.(*udphop.UDPHopAddr), config.UDPHopInterval, dialFunc)
-			},
-		}
-	} else {
-		config.ConnFactory = &client.UdpConnFactory{
-			NewFunc: func(ctx context.Context) (net.PacketConn, error) {
-				conn, err := nextDialer.DialContext(ctx, "udp", config.ServerAddr.String())
-				if err != nil {
-					return nil, err
-				}
-				return netproxy.NewFakeNetPacketConn(
-					conn.(netproxy.PacketConn),
-					net.UDPAddrFromAddrPort(common.GetUniqueFakeAddrPort()),
-					config.ServerAddr,
-				), nil
-			},
-		}
-	}
-
-	client, err := client.NewClient(config)
-	if err != nil {
-		return nil, err
-	}
-
 	return &Dialer{
-		client:   client,
-		metadata: metadata,
+		nextDialer: nextDialer,
+		baseConfig: config,
+		clients:    make(map[string]client.Client),
+		metadata:   metadata,
 	}, nil
 }
 
@@ -126,17 +94,101 @@ func isPortHoppingPort(port string) bool {
 	return strings.Contains(port, "-") || strings.Contains(port, ",")
 }
 
+func (d *Dialer) underlayNetwork(magicNetwork *netproxy.MagicNetwork) string {
+	return netproxy.MagicNetwork{
+		Network: "udp",
+		Mark:    magicNetwork.Mark,
+		Mptcp:   magicNetwork.Mptcp,
+	}.Encode()
+}
+
+func (d *Dialer) newConnFactory(underlayNetwork string) client.ConnFactory {
+	if d.baseConfig.ServerAddr.Network() == "udphop" {
+		return &client.UdpConnFactory{
+			NewFunc: func(ctx context.Context) (net.PacketConn, error) {
+				dialFunc := func(dialCtx context.Context, addr net.Addr) (net.PacketConn, error) {
+					conn, err := d.nextDialer.DialContext(dialCtx, underlayNetwork, addr.String())
+					if err != nil {
+						return nil, err
+					}
+					pc, err := asPacketConn(conn, addr.String())
+					if err != nil {
+						return nil, err
+					}
+					return netproxy.NewFakeNetPacketConn(
+						pc,
+						net.UDPAddrFromAddrPort(common.GetUniqueFakeAddrPort()),
+						addr,
+					), nil
+				}
+				return udphop.NewUDPHopPacketConn(ctx, d.baseConfig.ServerAddr.(*udphop.UDPHopAddr), d.baseConfig.UDPHopInterval, dialFunc)
+			},
+		}
+	}
+	return &client.UdpConnFactory{
+		NewFunc: func(ctx context.Context) (net.PacketConn, error) {
+			conn, err := d.nextDialer.DialContext(ctx, underlayNetwork, d.baseConfig.ServerAddr.String())
+			if err != nil {
+				return nil, err
+			}
+			pc, err := asPacketConn(conn, d.baseConfig.ServerAddr.String())
+			if err != nil {
+				return nil, err
+			}
+			return netproxy.NewFakeNetPacketConn(
+				pc,
+				net.UDPAddrFromAddrPort(common.GetUniqueFakeAddrPort()),
+				d.baseConfig.ServerAddr,
+			), nil
+		},
+	}
+}
+
+func asPacketConn(conn netproxy.Conn, addr string) (netproxy.PacketConn, error) {
+	if conn == nil {
+		return nil, fmt.Errorf("hysteria2 underlay dial returned nil conn for %s", addr)
+	}
+	pc, ok := conn.(netproxy.PacketConn)
+	if !ok {
+		_ = conn.Close()
+		return nil, fmt.Errorf("hysteria2 underlay requires PacketConn for %s", addr)
+	}
+	return pc, nil
+}
+
+var newHysteriaClient = client.NewClient
+
+func (d *Dialer) getClientForRoute(underlayNetwork string) (client.Client, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if c, ok := d.clients[underlayNetwork]; ok {
+		return c, nil
+	}
+	cfg := d.baseConfig
+	cfg.ConnFactory = d.newConnFactory(underlayNetwork)
+	c, err := newHysteriaClient(&cfg)
+	if err != nil {
+		return nil, err
+	}
+	d.clients[underlayNetwork] = c
+	return c, nil
+}
+
 func (d *Dialer) DialContext(ctx context.Context, network, address string) (netproxy.Conn, error) {
 	magicNetwork, err := netproxy.ParseMagicNetwork(network)
+	if err != nil {
+		return nil, err
+	}
+	clientForRoute, err := d.getClientForRoute(d.underlayNetwork(magicNetwork))
 	if err != nil {
 		return nil, err
 	}
 
 	switch magicNetwork.Network {
 	case "tcp":
-		return d.client.TCP(address, ctx)
+		return clientForRoute.TCP(address, ctx)
 	case "udp":
-		return d.client.UDP(address, ctx)
+		return clientForRoute.UDP(address, ctx)
 	default:
 		return nil, fmt.Errorf("unsupported network: %s", network)
 	}

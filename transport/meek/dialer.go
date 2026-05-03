@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 )
 
@@ -45,17 +46,17 @@ func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 		return nil, fmt.Errorf("NewMeek: unimplemented backdrop")
 	}
 
-	// skipVerify
-	if query.Get("allowInsecure") == "true" || query.Get("allowInsecure") == "1" ||
-		query.Get("skipVerify") == "true" || query.Get("skipVerify") == "1" {
-		m.skipVerify = true
-	}
+	m.skipVerify = common.ParseAllowInsecure(query)
 	// alpn
 	if query.Get("alpn") != "" {
 		// Set it not nil.
 		m.alpn = strings.Split(query.Get("alpn"), ",")
 	} else {
 		m.alpn = []string{"h2", "http/1.1"}
+	}
+	m.serverName = query.Get("serverName")
+	if m.serverName == "" {
+		m.serverName = meekUrl.Hostname()
 	}
 	if m.serverName == "" {
 		m.serverName = u.Hostname()
@@ -77,9 +78,11 @@ func (m *Dialer) DialContext(ctx context.Context, network, addr string) (c netpr
 	switch magicNetwork.Network {
 	case "tcp":
 		tripper := &httpTripperClient{
-			nextDialer: m.nextDialer,
-			addr:       addr,
-			url:        m.url,
+			nextDialer:   m.nextDialer,
+			addr:         addr,
+			url:          m.url,
+			tlsConfig:    m.tlsConfig.Clone(),
+			magicNetwork: network,
 		}
 
 		clientConfig := &config{
@@ -93,7 +96,7 @@ func (m *Dialer) DialContext(ctx context.Context, network, addr string) (c netpr
 		}
 
 		assembler := newAssemblerClient(tripper, clientConfig)
-		session, err := assembler.NewSession(context.Background())
+		session, err := assembler.NewSession(context.WithoutCancel(ctx))
 		if err != nil {
 			return nil, err
 		}

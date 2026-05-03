@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/daeuniverse/outbound/internal/testutil"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/direct"
@@ -16,6 +17,7 @@ import (
 )
 
 func TestTCP(t *testing.T) {
+	testutil.RequireLiveIntegration(t, "requires a live Hysteria2 server on localhost:8443 and external HTTPS reachability")
 	d, err := NewDialer(direct.SymmetricDirect, protocol.Header{
 		ProxyAddress: "localhost:8443",
 		SNI:          "",
@@ -52,6 +54,7 @@ func TestTCP(t *testing.T) {
 }
 
 func TestUDP(t *testing.T) {
+	testutil.RequireLiveIntegration(t, "requires a live Hysteria2 server on localhost:8443 and external DNS reachability")
 	d, err := NewDialer(direct.SymmetricDirect, protocol.Header{
 		ProxyAddress: "localhost:8443",
 		SNI:          "",

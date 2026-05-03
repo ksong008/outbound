@@ -38,6 +38,8 @@ type Conn struct {
 	isH2 bool
 }
 
+type h2RouteContextKey struct{}
+
 func (c *Conn) SetDeadline(t time.Time) error {
 	c.muFinishShakeFuncs.Lock()
 	defer c.muFinishShakeFuncs.Unlock()
@@ -227,6 +229,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 
 		// Thanks to v2fly/v2ray-core.
 		connectHttp2 := func(rawConn netproxy.Conn, h2clientConn *http2.ClientConn, req *http.Request) (conn *http2Conn, n int, err error) {
+			req = req.Clone(context.WithValue(req.Context(), h2RouteContextKey{}, c.magicNetwork))
 			pr, pw := io.Pipe()
 			req.Body = pr
 
@@ -267,7 +270,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			return connectHttp1(conn)
 		}
 
-		rawConn, h2Conn, err := connPool.GetConn(c.nextDialer, c.proxy.Addr, c.magicNetwork)
+		rawConn, h2Conn, err := c.proxy.h2Pool.GetConn(c.nextDialer, c.proxy.Addr, c.magicNetwork)
 		if err != nil {
 			return 0, err
 		}
@@ -301,8 +304,11 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 }
 
 func (c *Conn) Close() error {
-	// Do not close underlay conn because it has been managed by background go routine.
-	return nil
+	c.cancelShakeFinished()
+	if c.conn == nil {
+		return nil
+	}
+	return c.conn.Close()
 }
 
 func newHTTP2Conn(c net.Conn, pipedReqBody *io.PipeWriter, respBody io.ReadCloser) *http2Conn {
@@ -347,31 +353,34 @@ func newLockedList() *lockedList {
 }
 
 type poolIdent struct {
-	ele  *list.Element
-	addr string
+	ele *list.Element
+	key h2PoolKey
 }
+
+type h2PoolKey struct {
+	addr     string
+	routeKey string
+}
+
+type h2Route struct {
+	dialer       netproxy.Dialer
+	magicNetwork string
+}
+
 type h2ConnsPool struct {
 	mu           sync.Mutex
-	h2ConnsPool  map[string]*lockedList
+	h2ConnsPool  map[h2PoolKey]*lockedList
 	h2Conn2Ident map[*http2.ClientConn]*poolIdent
-	addr2Dialer  sync.Map
-	addr2Somark  sync.Map
+	routes       map[string]h2Route
 }
 
 func newH2ConnsPool() *h2ConnsPool {
 	return &h2ConnsPool{
 		mu:           sync.Mutex{},
-		h2ConnsPool:  make(map[string]*lockedList),
+		h2ConnsPool:  make(map[h2PoolKey]*lockedList),
 		h2Conn2Ident: make(map[*http2.ClientConn]*poolIdent),
-		addr2Dialer:  sync.Map{},
+		routes:       make(map[string]h2Route),
 	}
-}
-
-func (p *h2ConnsPool) registerAddrToDialerMapping(addr string, dialer netproxy.Dialer) {
-	p.addr2Dialer.Store(addr, dialer)
-}
-func (p *h2ConnsPool) registerAddrToMagicNetworkMapping(addr string, magicNetwork string) {
-	p.addr2Somark.Store(addr, magicNetwork)
 }
 
 func (p *h2ConnsPool) GetUnderlayConn(c *http2.ClientConn) (netproxy.Conn, error) {
@@ -385,11 +394,19 @@ func (p *h2ConnsPool) GetUnderlayConn(c *http2.ClientConn) (netproxy.Conn, error
 }
 
 func (p *h2ConnsPool) GetConn(nextDialer netproxy.Dialer, addr string, magicNetwork string) (netproxy.Conn, *http2.ClientConn, error) {
-	p.mu.Lock()
-	if p.h2ConnsPool[addr] == nil {
-		p.h2ConnsPool[addr] = newLockedList()
+	key := h2PoolKey{
+		addr:     addr,
+		routeKey: magicNetwork,
 	}
-	conns, cachedConnsFound := p.h2ConnsPool[addr]
+	p.mu.Lock()
+	if p.h2ConnsPool[key] == nil {
+		p.h2ConnsPool[key] = newLockedList()
+	}
+	p.routes[magicNetwork] = h2Route{
+		dialer:       nextDialer,
+		magicNetwork: magicNetwork,
+	}
+	conns, cachedConnsFound := p.h2ConnsPool[key]
 	p.mu.Unlock()
 
 	if cachedConnsFound {
@@ -442,12 +459,10 @@ func (p *h2ConnsPool) GetConn(nextDialer netproxy.Dialer, addr string, magicNetw
 		conns.mu.Unlock()
 		p.mu.Lock()
 		p.h2Conn2Ident[h2clientConn] = &poolIdent{
-			ele:  ele,
-			addr: addr,
+			ele: ele,
+			key: key,
 		}
 		p.mu.Unlock()
-		p.registerAddrToDialerMapping(addr, nextDialer)
-		p.registerAddrToMagicNetworkMapping(addr, magicNetwork)
 		return rawConn, h2clientConn, nil
 	default:
 		return nil, nil, fmt.Errorf("negotiated unsupported application layer protocol: %v", nextProto)
@@ -455,12 +470,25 @@ func (p *h2ConnsPool) GetConn(nextDialer netproxy.Dialer, addr string, magicNetw
 }
 
 func (p *h2ConnsPool) GetClientConn(req *http.Request, addr string) (*http2.ClientConn, error) {
-	d, ok := p.addr2Dialer.Load(addr)
+	routeKey, _ := req.Context().Value(h2RouteContextKey{}).(string)
+
+	p.mu.Lock()
+	if routeKey == "" {
+		if len(p.routes) != 1 {
+			p.mu.Unlock()
+			return nil, fmt.Errorf("no valid route context for h2ConnsPool.GetClientConn")
+		}
+		for key := range p.routes {
+			routeKey = key
+		}
+	}
+	route, ok := p.routes[routeKey]
 	if !ok {
+		p.mu.Unlock()
 		return nil, fmt.Errorf("no valid dialer for h2ConnsPool.GetClientConn")
 	}
-	somark, _ := p.addr2Dialer.Load(addr)
-	_, h2Conn, err := p.GetConn(d.(netproxy.Dialer), addr, somark.(string))
+	p.mu.Unlock()
+	_, h2Conn, err := p.GetConn(route.dialer, addr, route.magicNetwork)
 	return h2Conn, err
 }
 
@@ -471,12 +499,10 @@ func (p *h2ConnsPool) MarkDead(h2c *http2.ClientConn) {
 		p.mu.Unlock()
 		return
 	}
-	conns := p.h2ConnsPool[ident.addr]
+	conns := p.h2ConnsPool[ident.key]
 	delete(p.h2Conn2Ident, h2c)
 	p.mu.Unlock()
 	conns.mu.Lock()
 	conns.l.Remove(ident.ele)
 	conns.mu.Unlock()
 }
-
-var connPool = newH2ConnsPool()

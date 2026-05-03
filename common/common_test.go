@@ -2,6 +2,7 @@ package common
 
 import (
 	"bytes"
+	"net/url"
 	"testing"
 )
 
@@ -38,5 +39,30 @@ func TestBytesAddLittleEndian(t *testing.T) {
 		if !bytes.Equal(test[0], test[1]) {
 			t.Fatal(i, test[0], "!=", test[1])
 		}
+	}
+}
+
+func TestParseAllowInsecure(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  bool
+	}{
+		{name: "allowInsecure", query: "allowInsecure=1", want: true},
+		{name: "allow_insecure", query: "allow_insecure=true", want: true},
+		{name: "allowinsecure", query: "allowinsecure=1", want: true},
+		{name: "skipVerify", query: "skipVerify=true", want: true},
+		{name: "missing", query: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			values, err := url.ParseQuery(tc.query)
+			if err != nil {
+				t.Fatalf("ParseQuery returned error: %v", err)
+			}
+			if got := ParseAllowInsecure(values); got != tc.want {
+				t.Fatalf("ParseAllowInsecure() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

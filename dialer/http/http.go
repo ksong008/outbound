@@ -54,16 +54,6 @@ func ParseHTTPURL(link string) (data *HTTP, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("error when parsing port: %w", err)
 	}
-	allowInsecure, _ := strconv.ParseBool(u.Query().Get("allowInsecure"))
-	if !allowInsecure {
-		allowInsecure, _ = strconv.ParseBool(u.Query().Get("allow_insecure"))
-	}
-	if !allowInsecure {
-		allowInsecure, _ = strconv.ParseBool(u.Query().Get("allowinsecure"))
-	}
-	if !allowInsecure {
-		allowInsecure, _ = strconv.ParseBool(u.Query().Get("skipVerify"))
-	}
 	return &HTTP{
 		Name:          u.Fragment,
 		Server:        u.Hostname(),
@@ -72,7 +62,7 @@ func ParseHTTPURL(link string) (data *HTTP, err error) {
 		Password:      pwd,
 		SNI:           u.Query().Get("sni"),
 		Protocol:      u.Scheme,
-		AllowInsecure: allowInsecure,
+		AllowInsecure: common.ParseAllowInsecure(u.Query()),
 	}, nil
 }
 
@@ -96,8 +86,13 @@ func (s *HTTP) URL() url.URL {
 		Host:     net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
 		Fragment: s.Name,
 	}
-	if s.SNI != "" {
-		u.RawQuery = url.Values{"sni": []string{s.SNI}, "allowInsecure": []string{common.BoolToString(s.AllowInsecure)}}.Encode()
+	query := url.Values{}
+	common.SetValue(&query, "sni", s.SNI)
+	if s.AllowInsecure {
+		query.Set("allowInsecure", common.BoolToString(s.AllowInsecure))
+	}
+	if len(query) > 0 {
+		u.RawQuery = query.Encode()
 	}
 	if s.Username != "" {
 		if s.Password != "" {

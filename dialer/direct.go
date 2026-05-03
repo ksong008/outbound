@@ -12,9 +12,5 @@ func NewDirectDialer(option *ExtraOption, fullcone bool) (netproxy.Dialer, *Prop
 		Protocol: "",
 		Link:     "",
 	}
-	if fullcone {
-		return softwindDirect.FullconeDirect, property
-	} else {
-		return softwindDirect.SymmetricDirect, property
-	}
+	return softwindDirect.GetDirectDialer(fullcone), property
 }

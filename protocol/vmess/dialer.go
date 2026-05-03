@@ -97,19 +97,12 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 			mdata.Type = protocol.MetadataTypeDomain
 		}
 
-		if d.protocol == protocol.ProtocolVMessTlsGrpc {
-			d.nextDialer = &grpc.Dialer{
-				NextDialer:  d,
-				ServiceName: d.grpcServiceName,
-				ServerName:  d.proxySNI,
-			}
-		}
 		tcpNetwork := netproxy.MagicNetwork{
 			Network: "tcp",
 			Mark:    magicNetwork.Mark,
 			Mptcp:   magicNetwork.Mptcp,
 		}.Encode()
-		conn, err := d.nextDialer.DialContext(ctx, tcpNetwork, d.proxyAddress)
+		conn, err := d.transportDialer().DialContext(ctx, tcpNetwork, d.proxyAddress)
 		if err != nil {
 			return nil, err
 		}
@@ -120,5 +113,16 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 		}, addr, d.key)
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, magicNetwork.Network)
+	}
+}
+
+func (d *Dialer) transportDialer() netproxy.Dialer {
+	if d.protocol != protocol.ProtocolVMessTlsGrpc {
+		return d.nextDialer
+	}
+	return &grpc.Dialer{
+		NextDialer:  d.nextDialer,
+		ServiceName: d.grpcServiceName,
+		ServerName:  d.proxySNI,
 	}
 }

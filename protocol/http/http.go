@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
 	tls2 "github.com/daeuniverse/outbound/transport/tls"
@@ -23,6 +24,7 @@ type HttpProxy struct {
 	Username  string
 	Password  string
 	dialer    netproxy.Dialer
+	h2Pool    *h2ConnsPool
 }
 
 func NewHTTPProxy(u *url.URL, forward netproxy.Dialer) (netproxy.Dialer, error) {
@@ -34,6 +36,7 @@ func NewHTTPProxy(u *url.URL, forward netproxy.Dialer) (netproxy.Dialer, error) 
 	}
 	s.Host = u.Query().Get("host")
 	s.dialer = forward
+	s.h2Pool = newH2ConnsPool()
 	if u.User != nil {
 		s.HaveAuth = true
 		s.Username = u.User.Username()
@@ -55,29 +58,21 @@ func NewHTTPProxy(u *url.URL, forward netproxy.Dialer) (netproxy.Dialer, error) 
 		if u.Query().Get("alpn") != "" {
 			alpn = []string{u.Query().Get("alpn")}
 		}
-		u := url.URL{
+		tlsURL := url.URL{
 			Host: s.Addr,
 			RawQuery: url.Values{
-				"sni":  []string{serverName},
-				"alpn": alpn,
+				"sni":           []string{serverName},
+				"alpn":          alpn,
+				"allowInsecure": []string{strconv.FormatBool(common.ParseAllowInsecure(u.Query()))},
+				"utlsImitate":   []string{u.Query().Get("utlsImitate")},
 			}.Encode(),
-		}
-		allowInsecure, _ := strconv.ParseBool(u.Query().Get("allowInsecure"))
-		if !allowInsecure {
-			allowInsecure, _ = strconv.ParseBool(u.Query().Get("allow_insecure"))
-		}
-		if !allowInsecure {
-			allowInsecure, _ = strconv.ParseBool(u.Query().Get("allowinsecure"))
-		}
-		if !allowInsecure {
-			allowInsecure, _ = strconv.ParseBool(u.Query().Get("skipVerify"))
 		}
 		var err error
 		s.dialer, _, err = tls2.NewTls(&dialer.ExtraOption{
-			AllowInsecure:     allowInsecure,
+			AllowInsecure:     common.ParseAllowInsecure(u.Query()),
 			TlsImplementation: tlsImplementation,
 			UtlsImitate:       u.Query().Get("utlsImitate"),
-		}, s.dialer, u.String())
+		}, s.dialer, tlsURL.String())
 		if err != nil {
 			return nil, err
 		}

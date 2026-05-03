@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
 	tuiccommon "github.com/daeuniverse/outbound/protocol/tuic/common"
@@ -33,56 +34,76 @@ func xhttpErrf(kind, format string, args ...any) error {
 }
 
 type Dialer struct {
-	uploadEndpoint      endpoint
-	downloadEndpoint    *endpoint
-	mode                string
-	contentType         string
-	headers             http.Header
-	packetMaxBytes      int
-	packetMinGap        time.Duration
-	xmux                xmuxOptions
-	noSSEHeader         bool
-	scMaxBufferedPosts  int
-	xPaddingBytes       rangedInt
-	xPaddingObfsMode    bool
-	xPaddingKey         string
-	xPaddingHeader      string
-	xPaddingPlacement   string
-	xPaddingMethod      string
-	uplinkHTTPMethod    string
-	sessionPlacement    string
-	sessionKey          string
-	seqPlacement        string
-	seqKey              string
-	uplinkDataPlacement string
-	uplinkDataKey       string
-	uplinkChunkSize     rangedInt
+	uploadEndpoint            endpoint
+	downloadEndpoint          *endpoint
+	mode                      string
+	contentType               string
+	headers                   http.Header
+	downloadHeaders           http.Header
+	downloadXmux              xmuxOptions
+	packetMaxBytes            int
+	packetMinGap              time.Duration
+	xmux                      xmuxOptions
+	noSSEHeader               bool
+	scMaxBufferedPosts        int
+	xPaddingBytes             rangedInt
+	xPaddingObfsMode          bool
+	xPaddingKey               string
+	xPaddingHeader            string
+	xPaddingPlacement         string
+	xPaddingMethod            string
+	downloadXPaddingBytes     rangedInt
+	downloadXPaddingObfsMode  *bool
+	downloadXPaddingKey       string
+	downloadXPaddingHeader    string
+	downloadXPaddingPlacement string
+	downloadXPaddingMethod    string
+	uplinkHTTPMethod          string
+	sessionPlacement          string
+	sessionKey                string
+	downloadSessionPlacement  string
+	downloadSessionKey        string
+	seqPlacement              string
+	seqKey                    string
+	uplinkDataPlacement       string
+	uplinkDataKey             string
+	uplinkChunkSize           rangedInt
 }
 
 type XHTTPOptions struct {
-	Mode                string
-	Headers             http.Header
-	ContentType         string
-	DownloadSettings    *downloadSettingsConfig
-	PacketMaxBytes      int
-	PacketMinGap        time.Duration
-	Xmux                xmuxOptions
-	NoSSEHeader         bool
-	ScMaxBufferedPosts  int
-	XPaddingBytes       rangedInt
-	XPaddingObfsMode    bool
-	XPaddingKey         string
-	XPaddingHeader      string
-	XPaddingPlacement   string
-	XPaddingMethod      string
-	UplinkHTTPMethod    string
-	SessionPlacement    string
-	SessionKey          string
-	SeqPlacement        string
-	SeqKey              string
-	UplinkDataPlacement string
-	UplinkDataKey       string
-	UplinkChunkSize     rangedInt
+	Mode                      string
+	Headers                   http.Header
+	ContentType               string
+	DownloadSettings          *downloadSettingsConfig
+	DownloadXmux              xmuxOptions
+	DownloadHeaders           http.Header
+	PacketMaxBytes            int
+	PacketMinGap              time.Duration
+	Xmux                      xmuxOptions
+	NoSSEHeader               bool
+	ScMaxBufferedPosts        int
+	XPaddingBytes             rangedInt
+	XPaddingObfsMode          bool
+	XPaddingKey               string
+	XPaddingHeader            string
+	XPaddingPlacement         string
+	XPaddingMethod            string
+	DownloadXPaddingBytes     rangedInt
+	DownloadXPaddingObfsMode  *bool
+	DownloadXPaddingKey       string
+	DownloadXPaddingHeader    string
+	DownloadXPaddingPlacement string
+	DownloadXPaddingMethod    string
+	UplinkHTTPMethod          string
+	SessionPlacement          string
+	SessionKey                string
+	DownloadSessionPlacement  string
+	DownloadSessionKey        string
+	SeqPlacement              string
+	SeqKey                    string
+	UplinkDataPlacement       string
+	UplinkDataKey             string
+	UplinkChunkSize           rangedInt
 }
 
 func (o *XHTTPOptions) validate() error {
@@ -100,9 +121,6 @@ func (o *XHTTPOptions) validate() error {
 	}
 	if o.DownloadSettings != nil && o.DownloadSettings.XHTTPSettings.Mode != "" {
 		return xhttpErrf("config", "downloadSettings.xhttpSettings.mode is not supported yet")
-	}
-	if o.DownloadSettings != nil && strings.TrimSpace(o.DownloadSettings.XHTTPSettings.Extra) != "" {
-		return xhttpErrf("config", "downloadSettings.xhttpSettings.extra is not supported yet")
 	}
 	return nil
 }
@@ -123,6 +141,7 @@ type extraConfig struct {
 	NoSSEHeader          bool                    `json:"noSSEHeader"`
 	ScMaxBufferedPosts   int                     `json:"scMaxBufferedPosts"`
 	UplinkHTTPMethod     string                  `json:"uplinkHTTPMethod"`
+	UplinkHttpMethod     string                  `json:"uplinkHttpMethod"`
 	SessionPlacement     string                  `json:"sessionPlacement"`
 	SessionKey           string                  `json:"sessionKey"`
 	SeqPlacement         string                  `json:"seqPlacement"`
@@ -158,10 +177,19 @@ type realitySettingsConfig struct {
 }
 
 type xhttpSettingsConfig struct {
-	Host  string `json:"host"`
-	Path  string `json:"path"`
-	Mode  string `json:"mode"`
-	Extra string `json:"extra"`
+	Host              string            `json:"host"`
+	Path              string            `json:"path"`
+	Mode              string            `json:"mode"`
+	Extra             string            `json:"extra"`
+	Headers           map[string]string `json:"headers"`
+	XPaddingBytes     rangedInt         `json:"xPaddingBytes"`
+	XPaddingObfsMode  *bool             `json:"xPaddingObfsMode"`
+	XPaddingKey       string            `json:"xPaddingKey"`
+	XPaddingHeader    string            `json:"xPaddingHeader"`
+	XPaddingPlacement string            `json:"xPaddingPlacement"`
+	XPaddingMethod    string            `json:"xPaddingMethod"`
+	SessionPlacement  string            `json:"sessionPlacement"`
+	SessionKey        string            `json:"sessionKey"`
 }
 
 type endpoint struct {
@@ -188,6 +216,7 @@ type xmuxConfig struct {
 	CMaxReuseTimes   rangedInt `json:"cMaxReuseTimes"`
 	HMaxRequestTimes rangedInt `json:"hMaxRequestTimes"`
 	HMaxReusableSecs rangedInt `json:"hMaxReusableSecs"`
+	HKeepAlivePeriod int       `json:"hKeepAlivePeriod"`
 }
 
 type xmuxOptions struct {
@@ -197,6 +226,7 @@ type xmuxOptions struct {
 	maxReuseTimes    int
 	hMaxRequestTimes int
 	hMaxReusableSecs int
+	hKeepAlivePeriod int
 }
 
 type h2PoolEntry struct {
@@ -358,6 +388,88 @@ func shouldUseH3(alpn string) bool {
 	return len(parts) == 1 && strings.EqualFold(strings.TrimSpace(parts[0]), "h3")
 }
 
+func shouldUseHTTP1(alpn string) bool {
+	parts := strings.Split(alpn, ",")
+	return len(parts) == 1 && strings.EqualFold(strings.TrimSpace(parts[0]), "http/1.1")
+}
+
+func supportsH2(alpn string) bool {
+	if strings.TrimSpace(alpn) == "" {
+		return true
+	}
+	for _, part := range strings.Split(alpn, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), "h2") {
+			return true
+		}
+	}
+	return false
+}
+
+func validateTransportALPN(security, alpn string) error {
+	if !strings.EqualFold(security, "tls") && !strings.EqualFold(security, "reality") {
+		return nil
+	}
+	if shouldUseH3(alpn) || shouldUseHTTP1(alpn) || supportsH2(alpn) {
+		return nil
+	}
+	return xhttpErrf("config", "alpn %q is not supported for xhttp yet; only h2, exact h3, or exact http/1.1 are supported", alpn)
+}
+
+func defaultRequestHeaders(headers http.Header) http.Header {
+	if headers == nil {
+		headers = make(http.Header)
+	}
+	if headers.Get("User-Agent") == "" {
+		headers.Set("User-Agent", "Mozilla/5.0")
+	}
+	if headers.Get("Accept") == "" {
+		headers.Set("Accept", "*/*")
+	}
+	if headers.Get("Accept-Language") == "" {
+		headers.Set("Accept-Language", "en-US,en;q=0.9")
+	}
+	if headers.Get("Cache-Control") == "" {
+		headers.Set("Cache-Control", "no-cache")
+	}
+	if headers.Get("Pragma") == "" {
+		headers.Set("Pragma", "no-cache")
+	}
+	return headers
+}
+
+func cloneHeadersOrEmpty(headers http.Header) http.Header {
+	if headers == nil {
+		return make(http.Header)
+	}
+	cloned := headers.Clone()
+	if cloned == nil {
+		return make(http.Header)
+	}
+	return cloned
+}
+
+func mergedHeaders(base http.Header, overrides map[string]string) http.Header {
+	headers := cloneHeadersOrEmpty(base)
+	for key, value := range overrides {
+		headers.Set(key, value)
+	}
+	return defaultRequestHeaders(headers)
+}
+
+func overrideRangedInt(base, override rangedInt) rangedInt {
+	if override.set {
+		return override
+	}
+	return base
+}
+
+func overrideBoolPtr(base *bool, override *bool) *bool {
+	if override != nil {
+		return override
+	}
+	return base
+}
+
 func parseExtra(raw string) (extraConfig, error) {
 	if strings.TrimSpace(raw) == "" {
 		return extraConfig{}, nil
@@ -367,6 +479,29 @@ func parseExtra(raw string) (extraConfig, error) {
 		return extraConfig{}, xhttpErrf("config", "parse extra: %v", err)
 	}
 	return cfg, nil
+}
+
+func parseDownloadExtraXmux(raw string, fallback xmuxOptions) (xmuxOptions, error) {
+	if strings.TrimSpace(raw) == "" {
+		return fallback, nil
+	}
+	var rawFields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &rawFields); err != nil {
+		return fallback, xhttpErrf("config", "parse downloadSettings.xhttpSettings.extra: %v", err)
+	}
+	for key := range rawFields {
+		if key != "xmux" {
+			return fallback, xhttpErrf("config", "downloadSettings.xhttpSettings.extra currently only supports xmux, got %q", key)
+		}
+	}
+	extra, err := parseExtra(raw)
+	if err != nil {
+		return fallback, xhttpErrf("config", "parse downloadSettings.xhttpSettings.extra: %v", err)
+	}
+	if extra.Xmux == nil {
+		return fallback, nil
+	}
+	return parseXmux(extra.Xmux), nil
 }
 
 func buildXHTTPOptions(scheme, security, _ string, rawMode, rawExtra string) (*XHTTPOptions, error) {
@@ -384,36 +519,81 @@ func buildXHTTPOptions(scheme, security, _ string, rawMode, rawExtra string) (*X
 	for key, value := range extra.Headers {
 		headers.Set(key, value)
 	}
+	headers = defaultRequestHeaders(headers)
 
 	contentType := "application/grpc"
 	if extra.NoGRPCHeader {
 		contentType = ""
 	}
+	downloadXmux := parseXmux(extra.Xmux)
+	if extra.DownloadSettings != nil {
+		downloadXmux, err = parseDownloadExtraXmux(extra.DownloadSettings.XHTTPSettings.Extra, downloadXmux)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	options := &XHTTPOptions{
-		Mode:                mode,
-		Headers:             headers,
-		ContentType:         contentType,
-		DownloadSettings:    extra.DownloadSettings,
-		PacketMaxBytes:      extra.ScMaxEachPostBytes.Pick(),
-		PacketMinGap:        time.Duration(extra.ScMinPostsIntervalMs.Pick()) * time.Millisecond,
-		Xmux:                parseXmux(extra.Xmux),
-		NoSSEHeader:         extra.NoSSEHeader,
-		ScMaxBufferedPosts:  extra.ScMaxBufferedPosts,
-		XPaddingBytes:       extra.XPaddingBytes,
-		XPaddingObfsMode:    extra.XPaddingObfsMode,
-		XPaddingKey:         extra.XPaddingKey,
-		XPaddingHeader:      extra.XPaddingHeader,
-		XPaddingPlacement:   extra.XPaddingPlacement,
-		XPaddingMethod:      extra.XPaddingMethod,
-		UplinkHTTPMethod:    extra.UplinkHTTPMethod,
-		SessionPlacement:    extra.SessionPlacement,
-		SessionKey:          extra.SessionKey,
-		SeqPlacement:        extra.SeqPlacement,
-		SeqKey:              extra.SeqKey,
-		UplinkDataPlacement: extra.UplinkDataPlacement,
-		UplinkDataKey:       extra.UplinkDataKey,
-		UplinkChunkSize:     extra.UplinkChunkSize,
+		Mode:                      mode,
+		Headers:                   headers,
+		ContentType:               contentType,
+		DownloadSettings:          extra.DownloadSettings,
+		DownloadXmux:              downloadXmux,
+		DownloadHeaders:           headers,
+		PacketMaxBytes:            extra.ScMaxEachPostBytes.Pick(),
+		PacketMinGap:              time.Duration(extra.ScMinPostsIntervalMs.Pick()) * time.Millisecond,
+		Xmux:                      parseXmux(extra.Xmux),
+		NoSSEHeader:               extra.NoSSEHeader,
+		ScMaxBufferedPosts:        extra.ScMaxBufferedPosts,
+		XPaddingBytes:             extra.XPaddingBytes,
+		XPaddingObfsMode:          extra.XPaddingObfsMode,
+		XPaddingKey:               extra.XPaddingKey,
+		XPaddingHeader:            extra.XPaddingHeader,
+		XPaddingPlacement:         extra.XPaddingPlacement,
+		XPaddingMethod:            extra.XPaddingMethod,
+		DownloadXPaddingBytes:     extra.XPaddingBytes,
+		DownloadXPaddingKey:       extra.XPaddingKey,
+		DownloadXPaddingHeader:    extra.XPaddingHeader,
+		DownloadXPaddingPlacement: extra.XPaddingPlacement,
+		DownloadXPaddingMethod:    extra.XPaddingMethod,
+		UplinkHTTPMethod:          extra.UplinkHTTPMethod,
+		SessionPlacement:          extra.SessionPlacement,
+		SessionKey:                extra.SessionKey,
+		DownloadSessionPlacement:  extra.SessionPlacement,
+		DownloadSessionKey:        extra.SessionKey,
+		SeqPlacement:              extra.SeqPlacement,
+		SeqKey:                    extra.SeqKey,
+		UplinkDataPlacement:       extra.UplinkDataPlacement,
+		UplinkDataKey:             extra.UplinkDataKey,
+		UplinkChunkSize:           extra.UplinkChunkSize,
+	}
+	if options.UplinkHTTPMethod == "" {
+		options.UplinkHTTPMethod = extra.UplinkHttpMethod
+	}
+	options.DownloadXPaddingObfsMode = &options.XPaddingObfsMode
+	if extra.DownloadSettings != nil {
+		ds := extra.DownloadSettings.XHTTPSettings
+		options.DownloadHeaders = mergedHeaders(headers, ds.Headers)
+		options.DownloadXPaddingBytes = overrideRangedInt(options.DownloadXPaddingBytes, ds.XPaddingBytes)
+		options.DownloadXPaddingObfsMode = overrideBoolPtr(options.DownloadXPaddingObfsMode, ds.XPaddingObfsMode)
+		if ds.XPaddingKey != "" {
+			options.DownloadXPaddingKey = ds.XPaddingKey
+		}
+		if ds.XPaddingHeader != "" {
+			options.DownloadXPaddingHeader = ds.XPaddingHeader
+		}
+		if ds.XPaddingPlacement != "" {
+			options.DownloadXPaddingPlacement = ds.XPaddingPlacement
+		}
+		if ds.XPaddingMethod != "" {
+			options.DownloadXPaddingMethod = ds.XPaddingMethod
+		}
+		if ds.SessionPlacement != "" {
+			options.DownloadSessionPlacement = ds.SessionPlacement
+		}
+		if ds.SessionKey != "" {
+			options.DownloadSessionKey = ds.SessionKey
+		}
 	}
 	if options.Mode == "packet-up" {
 		if options.PacketMaxBytes <= 0 {
@@ -448,6 +628,7 @@ func parseXmux(cfg *xmuxConfig) xmuxOptions {
 		maxReuseTimes:    maxReuseTimes,
 		hMaxRequestTimes: hMaxRequestTimes,
 		hMaxReusableSecs: hMaxReusableSecs,
+		hKeepAlivePeriod: cfg.HKeepAlivePeriod,
 	}
 }
 
@@ -543,35 +724,39 @@ func appendToPathValue(pathValue, suffix string) string {
 }
 
 func (d *Dialer) applyMetaToRequest(req *http.Request, sessionID, seqStr string) {
+	d.applyMetaToRequestWith(req, sessionID, seqStr, d.normalizedSessionPlacement(), d.normalizedSessionKey(), d.normalizedSeqPlacement(), d.normalizedSeqKey())
+}
+
+func (d *Dialer) applyMetaToRequestWith(req *http.Request, sessionID, seqStr, sessionPlacement, sessionKey, seqPlacement, seqKey string) {
 	if req == nil {
 		return
 	}
 	if sessionID != "" {
-		switch d.normalizedSessionPlacement() {
+		switch sessionPlacement {
 		case placementPath:
 			req.URL.Path = appendToPathValue(req.URL.Path, sessionID)
 		case placementQuery:
 			q := req.URL.Query()
-			q.Set(d.normalizedSessionKey(), sessionID)
+			q.Set(sessionKey, sessionID)
 			req.URL.RawQuery = q.Encode()
 		case placementHeader:
-			req.Header.Set(d.normalizedSessionKey(), sessionID)
+			req.Header.Set(sessionKey, sessionID)
 		case placementCookie:
-			req.AddCookie(&http.Cookie{Name: d.normalizedSessionKey(), Value: sessionID})
+			req.AddCookie(&http.Cookie{Name: sessionKey, Value: sessionID})
 		}
 	}
 	if seqStr != "" {
-		switch d.normalizedSeqPlacement() {
+		switch seqPlacement {
 		case placementPath:
 			req.URL.Path = appendToPathValue(req.URL.Path, seqStr)
 		case placementQuery:
 			q := req.URL.Query()
-			q.Set(d.normalizedSeqKey(), seqStr)
+			q.Set(seqKey, seqStr)
 			req.URL.RawQuery = q.Encode()
 		case placementHeader:
-			req.Header.Set(d.normalizedSeqKey(), seqStr)
+			req.Header.Set(seqKey, seqStr)
 		case placementCookie:
-			req.AddCookie(&http.Cookie{Name: d.normalizedSeqKey(), Value: seqStr})
+			req.AddCookie(&http.Cookie{Name: seqKey, Value: seqStr})
 		}
 	}
 }
@@ -615,6 +800,9 @@ func (d *Dialer) applyPayloadToRequest(req *http.Request, payload []byte) error 
 
 func (d *Dialer) prepareStreamRequest(req *http.Request, sessionID string) {
 	req.Header = d.headers.Clone()
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
 	d.applyXPaddingToRequest(req)
 	d.applyMetaToRequest(req, sessionID, "")
 	if req.Body != nil && d.contentType != "" {
@@ -622,8 +810,25 @@ func (d *Dialer) prepareStreamRequest(req *http.Request, sessionID string) {
 	}
 }
 
+func (d *Dialer) prepareDownloadRequest(req *http.Request, sessionID string) {
+	req.Header = cloneHeadersOrEmpty(d.downloadHeaders)
+	d.applyDownloadPadding(req)
+	d.applyMetaToRequestWith(
+		req,
+		sessionID,
+		"",
+		normalizedPlacement(d.downloadSessionPlacement, placementPath),
+		sessionKeyForPlacement(d.downloadSessionPlacement, d.downloadSessionKey),
+		"",
+		"",
+	)
+}
+
 func (d *Dialer) preparePacketRequest(req *http.Request, sessionID, seqStr string, payload []byte) error {
 	req.Header = d.headers.Clone()
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
 	if err := d.applyPayloadToRequest(req, payload); err != nil {
 		return err
 	}
@@ -677,14 +882,55 @@ func generatePadding(length int, method string) string {
 }
 
 func (d *Dialer) applyXPaddingToRequest(req *http.Request) {
+	d.applyPaddingToRequest(req, d.xPaddingBytes, d.xPaddingObfsMode, d.xPaddingKey, d.xPaddingHeader, d.xPaddingPlacement, d.xPaddingMethod)
+}
+
+func normalizedPlacement(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return strings.ToLower(value)
+}
+
+func sessionKeyForPlacement(placement, key string) string {
+	if key != "" {
+		return key
+	}
+	switch normalizedPlacement(placement, placementPath) {
+	case placementHeader:
+		return "X-Session"
+	case placementCookie, placementQuery:
+		return "x_session"
+	default:
+		return ""
+	}
+}
+
+func (d *Dialer) applyDownloadPadding(req *http.Request) {
+	obfs := false
+	if d.downloadXPaddingObfsMode != nil {
+		obfs = *d.downloadXPaddingObfsMode
+	}
+	d.applyPaddingToRequest(
+		req,
+		d.downloadXPaddingBytes,
+		obfs,
+		d.downloadXPaddingKey,
+		d.downloadXPaddingHeader,
+		d.downloadXPaddingPlacement,
+		d.downloadXPaddingMethod,
+	)
+}
+
+func (d *Dialer) applyPaddingToRequest(req *http.Request, paddingBytes rangedInt, paddingObfsMode bool, paddingKey, paddingHeader, paddingPlacement, paddingMethod string) {
 	if req == nil {
 		return
 	}
-	padding := generatePadding(normalizedXPaddingRange(d.xPaddingBytes).Pick(), d.xPaddingMethod)
+	padding := generatePadding(normalizedXPaddingRange(paddingBytes).Pick(), paddingMethod)
 	if padding == "" {
 		return
 	}
-	if !d.xPaddingObfsMode {
+	if !paddingObfsMode {
 		u := *req.URL
 		q := u.Query()
 		q.Set("x_padding", padding)
@@ -693,21 +939,21 @@ func (d *Dialer) applyXPaddingToRequest(req *http.Request) {
 		return
 	}
 
-	switch strings.ToLower(d.xPaddingPlacement) {
+	switch strings.ToLower(paddingPlacement) {
 	case "header":
-		header := d.xPaddingHeader
+		header := paddingHeader
 		if header == "" {
 			header = "X-Padding"
 		}
 		req.Header.Set(header, padding)
 	case "cookie":
-		key := d.xPaddingKey
+		key := paddingKey
 		if key == "" {
 			key = "x_padding"
 		}
 		req.AddCookie(&http.Cookie{Name: key, Value: padding, Path: "/"})
 	case "query":
-		key := d.xPaddingKey
+		key := paddingKey
 		if key == "" {
 			key = "x_padding"
 		}
@@ -738,6 +984,9 @@ func newSecureEndpoint(
 	shortID string,
 	spiderX string,
 ) (endpoint, error) {
+	if err := validateTransportALPN(security, alpn); err != nil {
+		return endpoint{}, err
+	}
 	normalizedPath, rawQuery := normalizePathAndQuery(path)
 	useH3 := strings.EqualFold(security, "tls") && shouldUseH3(alpn)
 	if useH3 {
@@ -935,20 +1184,57 @@ func buildDownloadEndpoint(
 	return &ep, nil
 }
 
-func (d *Dialer) openH2Conn(ctx context.Context, ep endpoint) (netproxy.Conn, *http2.ClientConn, error) {
-	rawConn, err := ep.dialer.DialContext(ctx, "tcp", ep.addr)
+func (d *Dialer) openH2Conn(ctx context.Context, ep endpoint, network string, opts xmuxOptions) (netproxy.Conn, *http2.ClientConn, error) {
+	rawConn, err := ep.dialer.DialContext(ctx, network, ep.addr)
 	if err != nil {
 		return nil, nil, err
 	}
 	netConn := &netproxy.FakeNetConn{Conn: rawConn}
 
 	h2Transport := &http2.Transport{}
+	if opts.hKeepAlivePeriod > 0 {
+		h2Transport.ReadIdleTimeout = time.Duration(opts.hKeepAlivePeriod) * time.Second
+	}
 	h2ClientConn, err := h2Transport.NewClientConn(netConn)
 	if err != nil {
 		rawConn.Close()
 		return nil, nil, err
 	}
 	return rawConn, h2ClientConn, nil
+}
+
+func (d *Dialer) openHTTP1Client(ep endpoint, network string) *requestClient {
+	var (
+		mu    sync.Mutex
+		conns = make(map[netproxy.Conn]struct{})
+	)
+	transport := &http.Transport{
+		IdleConnTimeout:   300 * time.Second,
+		ForceAttemptHTTP2: false,
+		DialTLSContext: func(ctx context.Context, _ string, _ string) (net.Conn, error) {
+			rawConn, err := ep.dialer.DialContext(ctx, network, ep.addr)
+			if err != nil {
+				return nil, err
+			}
+			mu.Lock()
+			conns[rawConn] = struct{}{}
+			mu.Unlock()
+			return &netproxy.FakeNetConn{Conn: rawConn}, nil
+		},
+	}
+	return &requestClient{
+		rt: transport,
+		closeFn: func() error {
+			transport.CloseIdleConnections()
+			mu.Lock()
+			defer mu.Unlock()
+			for conn := range conns {
+				_ = conn.Close()
+				delete(conns, conn)
+			}
+			return nil
+		},
+	}
 }
 
 type requestRoundTripper interface {
@@ -1100,9 +1386,12 @@ func (c *h3PacketConn) SetReadDeadline(t time.Time) error { return c.conn.SetRea
 
 func (c *h3PacketConn) SetWriteDeadline(t time.Time) error { return c.conn.SetWriteDeadline(t) }
 
-func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network string) (*requestClient, error) {
+func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network string, opts xmuxOptions) (*requestClient, error) {
+	if shouldUseHTTP1(ep.alpn) {
+		return d.openHTTP1Client(ep, network), nil
+	}
 	if !ep.useH3 {
-		rawConn, h2Conn, err := d.openH2Conn(ctx, ep)
+		rawConn, h2Conn, err := d.openH2Conn(ctx, ep, network, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -1125,13 +1414,16 @@ func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network str
 		KeepAlivePeriod:    10 * time.Second,
 		MaxIncomingStreams: -1,
 	}
+	if opts.hKeepAlivePeriod > 0 {
+		quicCfg.KeepAlivePeriod = time.Duration(opts.hKeepAlivePeriod) * time.Second
+	}
 	rt := &http3.Transport{
 		TLSClientConfig: tlsCfg,
 		QUICConfig:      quicCfg,
 		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 			udpNetwork := netproxy.MagicNetwork{Network: "udp"}.Encode()
 			if magicNetwork, err := netproxy.ParseMagicNetwork(network); err == nil {
-				udpNetwork = netproxy.MagicNetwork{Network: "udp", Mark: magicNetwork.Mark}.Encode()
+				udpNetwork = netproxy.MagicNetwork{Network: "udp", Mark: magicNetwork.Mark, Mptcp: magicNetwork.Mptcp}.Encode()
 			}
 			conn, err := ep.nextDialer.DialContext(ctx, udpNetwork, ep.addr)
 			if err != nil {
@@ -1158,8 +1450,8 @@ func (d *Dialer) openRequestClient(ctx context.Context, ep endpoint, network str
 	}, nil
 }
 
-func (d *Dialer) acquireSingleUseRequestClient(ctx context.Context, ep endpoint, network string) (*requestClientLease, error) {
-	client, err := d.openRequestClient(ctx, ep, network)
+func (d *Dialer) acquireSingleUseRequestClient(ctx context.Context, ep endpoint, network string, opts xmuxOptions) (*requestClientLease, error) {
+	client, err := d.openRequestClient(ctx, ep, network, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -1171,8 +1463,8 @@ func (d *Dialer) acquireSingleUseRequestClient(ctx context.Context, ep endpoint,
 }
 
 func (d *Dialer) acquireStreamingRequestClient(ctx context.Context, ep endpoint, network string, opts xmuxOptions) (*requestClientLease, error) {
-	if ep.useH3 {
-		return d.acquireSingleUseRequestClient(ctx, ep, network)
+	if ep.useH3 || shouldUseHTTP1(ep.alpn) {
+		return d.acquireSingleUseRequestClient(ctx, ep, network, opts)
 	}
 	return d.acquireRequestClient(ctx, ep, network, opts)
 }
@@ -1270,7 +1562,7 @@ func (p *h3ClientPool) release(key string, entry *h3ClientEntry) error {
 
 func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network string, opts xmuxOptions) (*requestClientLease, error) {
 	if !ep.useH3 {
-		return d.acquireSingleUseRequestClient(ctx, ep, network)
+		return d.acquireSingleUseRequestClient(ctx, ep, network, opts)
 	}
 
 	key := requestClientReuseKey(ep, network)
@@ -1330,7 +1622,7 @@ func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network 
 	globalH3RequestPool.entries[key] = append(filtered, entry)
 	globalH3RequestPool.mu.Unlock()
 
-	client, err := d.openRequestClient(ctx, ep, network)
+	client, err := d.openRequestClient(ctx, ep, network, opts)
 	if err != nil {
 		globalH3RequestPool.mu.Lock()
 		entries := globalH3RequestPool.entries[key]
@@ -1378,7 +1670,7 @@ func (d *Dialer) acquireRequestClient(ctx context.Context, ep endpoint, network 
 	}, nil
 }
 
-func packetUploadReuseKey(ep endpoint) string {
+func packetUploadReuseKey(ep endpoint, network string) string {
 	return strings.Join([]string{
 		dialerIdentityKey(ep.nextDialer),
 		dialerIdentityKey(ep.dialer),
@@ -1395,12 +1687,13 @@ func packetUploadReuseKey(ep endpoint) string {
 		ep.shortID,
 		ep.spiderX,
 		strconv.FormatBool(ep.useH3),
+		network,
 	}, "|")
 }
 
-func (p *h2Pool) acquire(ctx context.Context, ep endpoint, opts xmuxOptions, opener func(context.Context, endpoint) (netproxy.Conn, *http2.ClientConn, error)) (*pooledH2Lease, error) {
+func (p *h2Pool) acquire(ctx context.Context, ep endpoint, network string, opts xmuxOptions, opener func(context.Context, endpoint, string, xmuxOptions) (netproxy.Conn, *http2.ClientConn, error)) (*pooledH2Lease, error) {
 	if !opts.enabled {
-		rawConn, h2Conn, err := opener(ctx, ep)
+		rawConn, h2Conn, err := opener(ctx, ep, network, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -1411,7 +1704,7 @@ func (p *h2Pool) acquire(ctx context.Context, ep endpoint, opts xmuxOptions, ope
 		}, nil
 	}
 
-	key := packetUploadReuseKey(ep)
+	key := packetUploadReuseKey(ep, network)
 	p.mu.Lock()
 	now := time.Now()
 	entries := p.entries[key]
@@ -1457,7 +1750,7 @@ func (p *h2Pool) acquire(ctx context.Context, ep endpoint, opts xmuxOptions, ope
 	}
 	p.mu.Unlock()
 
-	rawConn, h2Conn, err := opener(ctx, ep)
+	rawConn, h2Conn, err := opener(ctx, ep, network, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -1551,7 +1844,7 @@ func NewDialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link stri
 		return nil, err
 	}
 
-	allowInsecure := query.Get("allowInsecure") == "true" || query.Get("allowInsecure") == "1"
+	allowInsecure := common.ParseAllowInsecure(query)
 	utlsImitate := query.Get("utlsImitate")
 	publicKey := query.Get("pbk")
 	shortID := query.Get("sid")
@@ -1567,30 +1860,40 @@ func NewDialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link stri
 	}
 
 	return &Dialer{
-		uploadEndpoint:      uploadEndpoint,
-		downloadEndpoint:    downloadEndpoint,
-		mode:                options.Mode,
-		contentType:         options.ContentType,
-		headers:             options.Headers,
-		packetMaxBytes:      options.PacketMaxBytes,
-		packetMinGap:        options.PacketMinGap,
-		xmux:                options.Xmux,
-		xPaddingBytes:       options.XPaddingBytes,
-		xPaddingObfsMode:    options.XPaddingObfsMode,
-		xPaddingKey:         options.XPaddingKey,
-		xPaddingHeader:      options.XPaddingHeader,
-		xPaddingPlacement:   options.XPaddingPlacement,
-		xPaddingMethod:      options.XPaddingMethod,
-		uplinkHTTPMethod:    options.UplinkHTTPMethod,
-		sessionPlacement:    options.SessionPlacement,
-		sessionKey:          options.SessionKey,
-		seqPlacement:        options.SeqPlacement,
-		seqKey:              options.SeqKey,
-		uplinkDataPlacement: options.UplinkDataPlacement,
-		uplinkDataKey:       options.UplinkDataKey,
-		uplinkChunkSize:     options.UplinkChunkSize,
-		noSSEHeader:         options.NoSSEHeader,
-		scMaxBufferedPosts:  options.ScMaxBufferedPosts,
+		uploadEndpoint:            uploadEndpoint,
+		downloadEndpoint:          downloadEndpoint,
+		mode:                      options.Mode,
+		contentType:               options.ContentType,
+		headers:                   options.Headers,
+		downloadHeaders:           options.DownloadHeaders,
+		downloadXmux:              options.DownloadXmux,
+		packetMaxBytes:            options.PacketMaxBytes,
+		packetMinGap:              options.PacketMinGap,
+		xmux:                      options.Xmux,
+		xPaddingBytes:             options.XPaddingBytes,
+		xPaddingObfsMode:          options.XPaddingObfsMode,
+		xPaddingKey:               options.XPaddingKey,
+		xPaddingHeader:            options.XPaddingHeader,
+		xPaddingPlacement:         options.XPaddingPlacement,
+		xPaddingMethod:            options.XPaddingMethod,
+		downloadXPaddingBytes:     options.DownloadXPaddingBytes,
+		downloadXPaddingObfsMode:  options.DownloadXPaddingObfsMode,
+		downloadXPaddingKey:       options.DownloadXPaddingKey,
+		downloadXPaddingHeader:    options.DownloadXPaddingHeader,
+		downloadXPaddingPlacement: options.DownloadXPaddingPlacement,
+		downloadXPaddingMethod:    options.DownloadXPaddingMethod,
+		uplinkHTTPMethod:          options.UplinkHTTPMethod,
+		sessionPlacement:          options.SessionPlacement,
+		sessionKey:                options.SessionKey,
+		downloadSessionPlacement:  options.DownloadSessionPlacement,
+		downloadSessionKey:        options.DownloadSessionKey,
+		seqPlacement:              options.SeqPlacement,
+		seqKey:                    options.SeqKey,
+		uplinkDataPlacement:       options.UplinkDataPlacement,
+		uplinkDataKey:             options.UplinkDataKey,
+		uplinkChunkSize:           options.UplinkChunkSize,
+		noSSEHeader:               options.NoSSEHeader,
+		scMaxBufferedPosts:        options.ScMaxBufferedPosts,
 	}, nil
 }
 
@@ -1640,7 +1943,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		downloadClient := uploadClient
 		downloadLease := uploadLease
 		if d.downloadEndpoint != nil {
-			downloadLease, err = acquireClient(ctx, downloadEndpoint, network, d.xmux)
+			downloadLease, err = acquireClient(ctx, downloadEndpoint, network, d.downloadXmux)
 			if err != nil {
 				releaseOnError()
 				return nil, err
@@ -1657,7 +1960,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			return nil, err
 		}
 		downloadReq.Host = downloadEndpoint.host
-		d.prepareStreamRequest(downloadReq, sessionID)
+		d.prepareDownloadRequest(downloadReq, sessionID)
 		downloadLease.consumeRequest()
 		downloadResp, err := downloadClient.RoundTrip(downloadReq)
 		if err != nil {
@@ -1739,7 +2042,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		downloadClient := uploadClient
 		downloadLease := uploadLease
 		if d.downloadEndpoint != nil {
-			downloadLease, err = d.acquireRequestClient(ctx, downloadEndpoint, network, d.xmux)
+			downloadLease, err = d.acquireRequestClient(ctx, downloadEndpoint, network, d.downloadXmux)
 			if err != nil {
 				releaseOnError()
 				return nil, err
@@ -1756,7 +2059,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			return nil, err
 		}
 		downloadReq.Host = downloadEndpoint.host
-		d.prepareStreamRequest(downloadReq, sessionID)
+		d.prepareDownloadRequest(downloadReq, sessionID)
 		downloadLease.consumeRequest()
 
 		conn := &Conn{
@@ -1770,7 +2073,10 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			uploadErrCh:       make(chan struct{}),
 			requestCancel:     requestCancel,
 		}
-		packetFlushDelay := 15 * time.Millisecond
+		packetFlushDelay := d.packetMinGap
+		if packetFlushDelay <= 0 {
+			packetFlushDelay = defaultPacketMinGap
+		}
 		usePerRequestH3Upload := d.uploadEndpoint.useH3
 		var acquireUpload func() (*requestClientLease, error)
 		if usePerRequestH3Upload {
@@ -1834,7 +2140,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		}
 		if d.xmux.enabled && !d.uploadEndpoint.useH3 {
 			_ = uploadLease.release()
-			lease, err := globalPacketUploadPool.acquire(ctx, d.uploadEndpoint, d.xmux, d.openH2Conn)
+			lease, err := globalPacketUploadPool.acquire(ctx, d.uploadEndpoint, network, d.xmux, d.openH2Conn)
 			if err != nil {
 				conn.Close()
 				return nil, err
@@ -2143,9 +2449,6 @@ func (u *packetBatchUploader) run() {
 		if resp.StatusCode != http.StatusOK {
 			u.setErr(xhttpErrf("packet-up", "packet-up path returned %s", resp.Status))
 			return
-		}
-		if u.minGap > 0 {
-			time.Sleep(u.minGap)
 		}
 	}
 }

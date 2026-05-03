@@ -1,6 +1,7 @@
 package udphop
 
 import (
+	"context"
 	"errors"
 	"math/rand"
 	"net"
@@ -20,6 +21,7 @@ type udpHopPacketConn struct {
 	Addr        net.Addr
 	Addrs       []net.Addr
 	HopInterval time.Duration
+	dialCtx     context.Context
 	dialFunc    dialFunc
 
 	connMutex   sync.RWMutex
@@ -43,9 +45,9 @@ type udpPacket struct {
 	Err  error
 }
 
-type dialFunc = func(addr net.Addr) (net.PacketConn, error)
+type dialFunc = func(ctx context.Context, addr net.Addr) (net.PacketConn, error)
 
-func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc dialFunc) (net.PacketConn, error) {
+func NewUDPHopPacketConn(ctx context.Context, addr *UDPHopAddr, hopInterval time.Duration, dialFunc dialFunc) (net.PacketConn, error) {
 	if hopInterval == 0 {
 		hopInterval = defaultHopInterval
 	} else if hopInterval < 5*time.Second {
@@ -57,14 +59,19 @@ func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc d
 	}
 
 	newAddrIndex := rand.Intn(len(addrs))
-	curConn, err := dialFunc(addrs[newAddrIndex])
+	curConn, err := dialFunc(ctx, addrs[newAddrIndex])
 	if err != nil {
 		return nil, err
+	}
+	hopCtx := context.Background()
+	if ctx != nil {
+		hopCtx = context.WithoutCancel(ctx)
 	}
 	hConn := &udpHopPacketConn{
 		Addr:        addr,
 		Addrs:       addrs,
 		HopInterval: hopInterval,
+		dialCtx:     hopCtx,
 		dialFunc:    dialFunc,
 		prevConn:    nil,
 		currentConn: curConn,
@@ -126,7 +133,7 @@ func (u *udpHopPacketConn) hop() {
 		return
 	}
 	newAddrIndex := rand.Intn(len(u.Addrs))
-	newConn, err := u.dialFunc(u.Addrs[newAddrIndex])
+	newConn, err := u.dialFunc(u.dialCtx, u.Addrs[newAddrIndex])
 	if err != nil {
 		// Could be temporary, just skip this hop
 		return

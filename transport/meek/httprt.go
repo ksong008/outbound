@@ -9,27 +9,40 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 )
 
 var (
-	globalRoundTripperCacheMap    map[string]http.RoundTripper
+	globalRoundTripperCacheMap    map[roundTripperCacheKey]http.RoundTripper
 	globalRoundTripperCacheAccess sync.Mutex
 )
 
+type roundTripperCacheKey struct {
+	addr         string
+	url          string
+	magicNetwork string
+	serverName   string
+	alpn         string
+	dialer       string
+	skipVerify   bool
+}
+
 type httpTripperClient struct {
-	addr       string
-	nextDialer netproxy.Dialer
-	tlsConfig  *tls.Config
-	url        string
+	addr         string
+	nextDialer   netproxy.Dialer
+	tlsConfig    *tls.Config
+	url          string
+	magicNetwork string
 }
 
 func CleanGlobalRoundTripperCache() {
 	globalRoundTripperCacheAccess.Lock()
 	old := globalRoundTripperCacheMap
-	globalRoundTripperCacheMap = make(map[string]http.RoundTripper)
+	globalRoundTripperCacheMap = make(map[roundTripperCacheKey]http.RoundTripper)
 	globalRoundTripperCacheAccess.Unlock()
 
 	for _, rt := range old {
@@ -44,7 +57,7 @@ func (c *httpTripperClient) RoundTrip(ctx context.Context, req Request) (resp Re
 
 	connectionTagStr := base64.RawURLEncoding.EncodeToString(req.ConnectionTag)
 
-	httpRequest, err := http.NewRequest("POST", c.url, bytes.NewReader(req.Data))
+	httpRequest, err := http.NewRequestWithContext(ctx, "POST", c.url, bytes.NewReader(req.Data))
 	if err != nil {
 		return
 	}
@@ -64,15 +77,25 @@ func (c *httpTripperClient) RoundTrip(ctx context.Context, req Request) (resp Re
 }
 
 func (c *httpTripperClient) getRoundTripper() http.RoundTripper {
+	key := roundTripperCacheKey{
+		addr:         c.addr,
+		url:          c.url,
+		magicNetwork: c.magicNetwork,
+		serverName:   c.tlsConfig.ServerName,
+		alpn:         strings.Join(c.tlsConfig.NextProtos, ","),
+		dialer:       common.IdentityKey(c.nextDialer),
+		skipVerify:   c.tlsConfig.InsecureSkipVerify,
+	}
+
 	globalRoundTripperCacheAccess.Lock()
 	defer globalRoundTripperCacheAccess.Unlock()
 	if globalRoundTripperCacheMap == nil {
-		globalRoundTripperCacheMap = make(map[string]http.RoundTripper)
+		globalRoundTripperCacheMap = make(map[roundTripperCacheKey]http.RoundTripper)
 	}
-	if _, ok := globalRoundTripperCacheMap[c.addr]; !ok {
-		globalRoundTripperCacheMap[c.addr] = &http.Transport{
+	if _, ok := globalRoundTripperCacheMap[key]; !ok {
+		globalRoundTripperCacheMap[key] = &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				rc, err := c.nextDialer.DialContext(ctx, network, addr)
+				rc, err := c.nextDialer.DialContext(ctx, c.magicNetwork, addr)
 				if err != nil {
 					return nil, fmt.Errorf("[Meek]: dial to %s: %w", c.addr, err)
 				}
@@ -85,5 +108,5 @@ func (c *httpTripperClient) getRoundTripper() http.RoundTripper {
 			TLSClientConfig: c.tlsConfig,
 		}
 	}
-	return globalRoundTripperCacheMap[c.addr]
+	return globalRoundTripperCacheMap[key]
 }

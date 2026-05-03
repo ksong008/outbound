@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/daeuniverse/outbound/netproxy"
@@ -14,11 +15,37 @@ import (
 var (
 	SymmetricDirect netproxy.Dialer
 	FullconeDirect  netproxy.Dialer
+	directDialerMu  sync.Mutex
 )
 
 func InitDirectDialers(fallbackDNS string) {
+	directDialerMu.Lock()
+	defer directDialerMu.Unlock()
 	SymmetricDirect = NewDirectDialerLaddr(netip.Addr{}, Option{FullCone: false, FallbackDNS: fallbackDNS})
 	FullconeDirect = NewDirectDialerLaddr(netip.Addr{}, Option{FullCone: true, FallbackDNS: fallbackDNS})
+}
+
+func init() {
+	ensureDirectDialers()
+}
+
+func ensureDirectDialers() {
+	directDialerMu.Lock()
+	defer directDialerMu.Unlock()
+	if SymmetricDirect == nil {
+		SymmetricDirect = NewDirectDialerLaddr(netip.Addr{}, Option{FullCone: false})
+	}
+	if FullconeDirect == nil {
+		FullconeDirect = NewDirectDialerLaddr(netip.Addr{}, Option{FullCone: true})
+	}
+}
+
+func GetDirectDialer(fullcone bool) netproxy.Dialer {
+	ensureDirectDialers()
+	if fullcone {
+		return FullconeDirect
+	}
+	return SymmetricDirect
 }
 
 type Option struct {

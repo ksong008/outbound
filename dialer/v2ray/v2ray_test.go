@@ -123,6 +123,22 @@ func TestParseVlessURLXHTTP(t *testing.T) {
 	}
 }
 
+func TestParseVlessURLAllowInsecureAliases(t *testing.T) {
+	for _, raw := range []string{
+		"vless://uuid@example.com:443?type=tcp&security=tls&skipVerify=1#node",
+		"vless://uuid@example.com:443?type=tcp&security=tls&allow_insecure=true#node",
+		"vless://uuid@example.com:443?type=tcp&security=tls&allowinsecure=1#node",
+	} {
+		cfg, err := ParseVlessURL(raw)
+		if err != nil {
+			t.Fatalf("ParseVlessURL returned error: %v", err)
+		}
+		if !cfg.AllowInsecure {
+			t.Fatalf("expected allowInsecure to be true for %q", raw)
+		}
+	}
+}
+
 func TestExportVlessURLXHTTP(t *testing.T) {
 	cfg := &V2Ray{
 		Ps:            "xhttp",
@@ -226,5 +242,24 @@ func TestExportVlessURLXHTTPReality(t *testing.T) {
 		if !strings.Contains(exported, fragment) {
 			t.Fatalf("expected exported URL to contain %q, got %q", fragment, exported)
 		}
+	}
+}
+
+func TestExportVlessURLMeekPreservesURLField(t *testing.T) {
+	cfg := &V2Ray{
+		Ps:       "meek",
+		Add:      "example.com",
+		Port:     "443",
+		ID:       "uuid",
+		Net:      "meek",
+		Path:     "https://front.example/meek",
+		TLS:      "tls",
+		SNI:      "front.example",
+		Protocol: "vless",
+	}
+
+	exported := cfg.ExportToURL()
+	if !strings.Contains(exported, "url=https%3A%2F%2Ffront.example%2Fmeek") {
+		t.Fatalf("expected exported URL to preserve meek url field, got %q", exported)
 	}
 }

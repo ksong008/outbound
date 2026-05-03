@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/daeuniverse/outbound/internal/testutil"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/direct"
@@ -17,6 +18,7 @@ type Params struct {
 }
 
 func TestNewSSStream(t *testing.T) {
+	testutil.RequireLiveIntegration(t, "requires a live Shadowsocks stream server on localhost:8989 and external HTTPS reachability")
 	// https://github.com/winterssy/SSR-Docker
 
 	params := Params{
