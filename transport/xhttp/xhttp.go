@@ -2073,10 +2073,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			uploadErrCh:       make(chan struct{}),
 			requestCancel:     requestCancel,
 		}
-		packetFlushDelay := d.packetMinGap
-		if packetFlushDelay <= 0 {
-			packetFlushDelay = defaultPacketMinGap
-		}
+		packetFlushDelay := 15 * time.Millisecond
 		usePerRequestH3Upload := d.uploadEndpoint.useH3
 		var acquireUpload func() (*requestClientLease, error)
 		if usePerRequestH3Upload {
@@ -2449,6 +2446,9 @@ func (u *packetBatchUploader) run() {
 		if resp.StatusCode != http.StatusOK {
 			u.setErr(xhttpErrf("packet-up", "packet-up path returned %s", resp.Status))
 			return
+		}
+		if u.minGap > 0 {
+			time.Sleep(u.minGap)
 		}
 	}
 }

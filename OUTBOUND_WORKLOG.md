@@ -1006,6 +1006,32 @@ Result:
 - targeted new package tests above: pass
 - `outbound go test ./...`: still pass after the added coverage
 
+### 2026-05-03 Local rollback probe: xhttp packet-up timing
+
+Context:
+
+- VPS-side observation showed:
+  - `18447` (`vless-xhttp-h3-packet-up`) looked healthy
+  - `18444` (`vless-xhttp-h3` with `mode=auto`) showed repeated
+    `H3_REQUEST_CANCELLED`
+- because local plain-TLS `auto` normalizes to `packet-up`, the most suspicious
+  recent client-side delta remained the packet-up batching timing rewrite
+
+Probe scope:
+
+- revert only the recent packet-up timing behavior
+- keep the rest of the current xhttp refactor surface unchanged
+
+Local rollback details:
+
+- restore fixed `15ms` pre-flush delay for packet-up batch uploader
+- restore post-send `minGap` sleep in the packet-up uploader loop
+
+Purpose:
+
+- isolate whether the timing rewrite alone is a credible cause of the observed
+  `h3 auto` instability
+
 ## 2026-05-03 Audit: non-xhttp outbound review
 
 This round explicitly excludes `transport/xhttp`.
