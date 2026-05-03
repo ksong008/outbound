@@ -947,6 +947,65 @@ Result:
   `../outbound`
 - temporary `go.local.mod` / `go.local.sum` were removed again after validation
 
+### Batch 10 implementation notes
+
+This batch continued improving the test surface for packages that still showed
+`[no test files]` but were simple enough to cover with stable unit tests.
+
+Completed in this batch:
+
+- [x] add unit coverage for `transport/tls` config parsing:
+  - insecure aliases
+  - ALPN propagation
+  - option-driven `utls` override
+- [x] add unit coverage for `transport/ws` config parsing:
+  - host-header override
+  - `wss` TLS settings
+  - ALPN propagation
+- [x] add unit coverage for `transport/httpupgrade` config parsing:
+  - path normalization
+  - TLS settings
+  - explicit `serverName`
+- [x] add unit coverage for `protocol/socks5` address encode/decode helpers
+- [x] add unit coverage for `transport/simpleobfs` config parsing
+- [x] add unit coverage for `protocol/anytls` dialer construction
+- [x] add unit coverage for `transport/mux` TCP wrapping and UDP passthrough
+
+Resulting effect on test surface:
+
+- these packages no longer report `[no test files]`:
+  - `transport/tls`
+  - `transport/ws`
+  - `transport/httpupgrade`
+  - `protocol/socks5`
+  - `transport/simpleobfs`
+  - `protocol/anytls`
+  - `transport/mux`
+
+Validation for this batch:
+
+```bash
+PATH=/root/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.3.linux-amd64/bin:$PATH \
+GOPROXY=https://goproxy.cn,direct \
+GOSUMDB=sum.golang.google.cn \
+go test -count=1 \
+  ./protocol/anytls ./protocol/socks5 \
+  ./transport/httpupgrade ./transport/mux \
+  ./transport/simpleobfs ./transport/tls ./transport/ws
+```
+
+```bash
+PATH=/root/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.3.linux-amd64/bin:$PATH \
+GOPROXY=https://goproxy.cn,direct \
+GOSUMDB=sum.golang.google.cn \
+go test -count=1 -timeout 60s ./...
+```
+
+Result:
+
+- targeted new package tests above: pass
+- `outbound go test ./...`: still pass after the added coverage
+
 ## 2026-05-03 Audit: non-xhttp outbound review
 
 This round explicitly excludes `transport/xhttp`.
